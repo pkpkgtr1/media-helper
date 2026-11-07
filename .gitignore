@@ -1,0 +1,51 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Frontend dependencies and generated output
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Local settings, task history, logs and downloaded media
+/.media-helper/
+/media/
+*.log
+*.nfo
+*.nfo.bak*
+*.mp4
+*.mkv
+*.webm
+*.part
+*.bak
+/.env
+/.env.*
+!/.env.example
+/config.toml
+
+# Locally installed third-party binaries, browsers and translation models
+/bin/
+/ms-playwright/
+/models/
+*.exe
+*.dll
+*.argosmodel
+
+# Editor and export environment
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+.figma/
+*-debug.log*
