@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
-import media_storage as storage
+import media_helper.config as storage
 
 
 class CategoryRulesTests(unittest.TestCase):
@@ -467,6 +467,65 @@ class TemporaryLibraryTests(unittest.TestCase):
         self.assertEqual("exclude", instance.settings["unseenDefault"])
 
 
+class StagingCleanupTests(unittest.TestCase):
+    """Killed workers leave .media-download-* dirs behind; only those are removed."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="media-staging-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.base = Path(self.temporary.name).resolve()
+        self.root = self.base / "媒体资料"
+        self.month = self.root / "2026-04"
+        self.month.mkdir(parents=True)
+
+    def staging(self, directory=None, name=".media-download-fixture"):
+        directory = directory or self.month
+        result = directory / name
+        result.mkdir()
+        (result / "part.mp4").write_bytes(b"fixture part")
+        return result
+
+    def test_leftover_staging_directory_is_removed(self):
+        directory = self.staging()
+        self.assertEqual([str(directory)], storage.cleanup_staging_dirs(self.month))
+        self.assertFalse(directory.exists())
+
+    def test_month_output_files_are_never_removed(self):
+        keep = [self.month / "River Study.nfo", self.month / "River Study.mp4",
+                self.month / "2026-04.json"]
+        for path in keep:
+            path.write_bytes(b"fixture")
+        visible = self.month / ".media-download-not-a-dir"
+        visible.write_bytes(b"fixture")
+        nested = self.month / "sub" / ".media-download-nested"
+        nested.mkdir(parents=True)
+        self.assertEqual([], storage.cleanup_staging_dirs(self.month))
+        self.assertTrue(all(path.exists() for path in keep))
+        self.assertTrue(visible.exists())
+        self.assertTrue(nested.exists())
+
+    def test_symlink_to_directory_is_not_followed(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_bytes(b"fixture")
+        link = self.month / ".media-download-link"
+        try:
+            link.symlink_to(outside, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("符号链接不可用")
+        self.assertEqual([], storage.cleanup_staging_dirs(self.month))
+        self.assertTrue((outside / "keep.txt").exists())
+
+    def test_nested_month_and_missing_directory_are_harmless(self):
+        other = self.root / "2026-05"
+        other.mkdir()
+        second = self.staging(other, ".media-download-second")
+        self.assertEqual([], storage.cleanup_staging_dirs(self.month))
+        self.assertTrue(second.exists())
+        self.assertEqual([], storage.cleanup_staging_dirs(self.root / "2026-12"))
+        self.assertEqual([str(second)], storage.cleanup_staging_dirs(other))
+
+
 class ProxySettingsTests(unittest.TestCase):
     """Proxy switch semantics: validation, URL normalisation and env publication."""
 
@@ -510,15 +569,6 @@ class ProxySettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             storage.validate_settings({"proxyEnabled": "yes", "proxyUrl": "http://h:1"})
 
-    def test_playwright_proxy_splits_auth_and_bypass(self):
-        option = storage.playwright_proxy("http://Clash:bl9a2S5W@192.168.11.2:7893")
-        self.assertEqual(option["server"], "http://192.168.11.2:7893")
-        self.assertEqual(option["username"], "Clash")
-        self.assertEqual(option["password"], "bl9a2S5W")
-        self.assertIn("127.0.0.1", option["bypass"])
-        plain = storage.playwright_proxy("socks5://10.0.0.1:1080")
-        self.assertEqual(plain, {"server": "socks5://10.0.0.1:1080", "bypass": plain["bypass"]})
-        self.assertNotIn("username", plain)
 
     def test_configure_proxy_env_sets_and_clears(self):
         keep = {k: v for k, v in os.environ.items()}
@@ -553,94 +603,147 @@ class ProxySettingsTests(unittest.TestCase):
                     os.environ[name] = value
 
 
-class BrowserInstallHintTests(unittest.TestCase):
-    def test_hint_matches_platform_runtime(self):
-        import unittest.mock as mock
-        import media_storage as st
-        with mock.patch.object(st.os, "name", "posix"):
-            hint = st.browser_install_hint()
-        self.assertIn("PLAYWRIGHT_BROWSERS_PATH", hint)
-        self.assertIn("playwright install chromium", hint)
-        self.assertIn(".venv/bin/python", hint)
-        with mock.patch.object(st.os, "name", "nt"):
-            hint = st.browser_install_hint()
-        self.assertIn("ms-playwright", hint)
-        self.assertIn("playwright install chromium", hint)
-        self.assertIn("Scripts", hint)  # Windows 用 Scripts 而不是 bin
-
-
-class BrowserDiscoveryTests(unittest.TestCase):
-    """Project bundle wins over HOME caches; detection covers linux and windows layouts."""
+class StateDirMigrationTests(unittest.TestCase):
+    """记录与日志统一放在 config/；旧 .media-helper/ 首次启动自动搬过去。"""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
-        self.app_root = self.root / "app"
-        self.bundle = self.app_root / "ms-playwright"
-        self.fake_home = self.root / "home"
-        (self.fake_home / ".cache" / "ms-playwright").mkdir(parents=True)
-        self.app_root.mkdir(parents=True, exist_ok=True)
-        self.env = patch.dict(os.environ, {"HOME": str(self.fake_home), "USERPROFILE": str(self.fake_home)}, clear=True)
-        self.paths = patch.object(storage, "APP_ROOT", self.app_root)
+        self.legacy = self.root / ".media-helper"
+        self.target = self.root / "config"
 
     def tearDown(self):
-        self.paths.stop(); self.env.stop(); self.temp.cleanup()
+        self.temp.cleanup()
 
-    def _start(self):
-        self.env.start(); self.paths.start()
+    def _legacy_tree(self):
+        (self.legacy / "huangguo").mkdir(parents=True)
+        (self.legacy / "jobs").mkdir()
+        (self.legacy / "settings.json").write_text('{"retries": 4}', encoding="utf-8")
+        (self.legacy / "tasks.json").write_text("[]", encoding="utf-8")
+        (self.legacy / "operations.log").write_text("line\n", encoding="utf-8")
+        (self.legacy / "huangguo" / "downloads.json").write_text("{}", encoding="utf-8")
+        (self.legacy / "jobs" / "job.json").write_text("{}", encoding="utf-8")
 
-    def _binary(self, directory, name="chrome"):
-        directory.mkdir(parents=True, exist_ok=True)
-        binary = directory / name
-        binary.write_bytes(b"#!/bin/sh\n")
-        binary.chmod(0o755)
-        return binary
+    def test_moves_every_record_and_log(self):
+        self._legacy_tree()
+        report = storage.migrate_state_dir(self.target, self.legacy)
+        self.assertTrue(report["migrated"])
+        for name in ("settings.json", "tasks.json", "operations.log",
+                     "huangguo/downloads.json", "jobs/job.json"):
+            self.assertTrue((self.target / name).is_file(), name)
+        self.assertFalse(self.legacy.exists())
+        self.assertEqual("line\n", (self.target / "operations.log").read_text(encoding="utf-8"))
 
-    def test_project_bundle_takes_priority(self):
-        self._start()
-        bundle_bin = self._binary(self.bundle / "chromium-1248" / "chrome-linux64")
-        self._binary(self.fake_home / ".cache" / "ms-playwright" / "chromium-1248" / "chrome-linux64")
-        self.assertEqual(storage.find_browser_executable(), bundle_bin)
-        self.assertEqual(storage.configure_browser_env(), self.bundle.resolve())
-        self.assertEqual(os.environ["PLAYWRIGHT_BROWSERS_PATH"], str(self.bundle.resolve()))
+    def test_existing_config_is_never_overwritten(self):
+        self._legacy_tree()
+        self.target.mkdir()
+        (self.target / "settings.json").write_text('{"proxyEnabled": false}', encoding="utf-8")
+        report = storage.migrate_state_dir(self.target, self.legacy)
+        self.assertFalse(report["migrated"])
+        self.assertEqual("target-exists", report["reason"])
+        self.assertEqual('{"proxyEnabled": false}', (self.target / "settings.json").read_text(encoding="utf-8"))
+        self.assertTrue(self.legacy.is_dir())  # 旧目录保持原样，便于用户自己确认
 
-    def test_headless_shell_and_windows_layouts_detected(self):
-        self._start()
-        expected = self._binary(self.bundle / "chromium_headless_shell-1248" / "chrome-headless-shell-linux64",
-                                name="chrome-headless-shell")
-        self.assertEqual(storage.find_browser_executable(), expected)
-        # 换一套只有 Windows 布局的目录
-        import shutil as _shutil
-        _shutil.rmtree(self.bundle)
-        expected = self._binary(self.bundle / "chromium-1248" / "chrome-win", name="chrome.exe")
-        self.assertEqual(storage.find_browser_executable(), expected)
+    def test_no_legacy_is_a_noop(self):
+        report = storage.migrate_state_dir(self.target, self.legacy)
+        self.assertFalse(report["migrated"])
+        self.assertEqual("no-legacy", report["reason"])
+        self.assertFalse(self.target.exists())
 
-    def test_missing_or_empty_tree_is_not_ready(self):
-        self._start()
-        self.assertIsNone(storage.find_browser_executable())
-        empty_dir = self.bundle / "chromium-1248" / "chrome-linux64"
-        empty_dir.mkdir(parents=True)
-        (empty_dir / "chrome").write_bytes(b"")
-        self.assertIsNone(storage.find_browser_executable())
-        self.assertIsNone(storage.configure_browser_env())
-        self.assertNotIn("PLAYWRIGHT_BROWSERS_PATH", os.environ)
+    def test_storage_defaults_to_config_and_migrates(self):
+        self._legacy_tree()
+        real_migrate = storage.migrate_state_dir
+        with patch.object(storage, "default_state_dir", lambda: self.target), \
+                patch.object(storage, "migrate_state_dir", lambda *a, **kw: real_migrate(self.target, self.legacy)):
+            instance = storage.Storage()
+            self.assertEqual(self.target, instance.state_dir)
+            self.assertTrue(instance.migration["migrated"])
+            self.assertEqual(4, instance.settings["retries"])
 
-    def test_configured_path_used_when_bundle_missing(self):
-        self._start()
-        configured = self.root / "custom"
-        expected = self._binary(configured / "chromium-1248" / "chrome-linux64")
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(configured)
-        self.assertEqual(storage.find_browser_executable(), expected)
-        # 显式配置优先，configure 不改写它。
-        self.assertIsNone(storage.configure_browser_env())
-        self.assertEqual(os.environ["PLAYWRIGHT_BROWSERS_PATH"], str(configured))
-
-    def test_home_cache_found_without_bundle(self):
-        self._start()
-        expected = self._binary(self.fake_home / ".cache" / "ms-playwright" / "chromium-1248" / "chrome-linux64")
-        self.assertEqual(storage.find_browser_executable(), expected)
-        self.assertIsNone(storage.configure_browser_env())
+    def test_explicit_state_dir_skips_migration(self):
+        self._legacy_tree()
+        with patch.object(storage, "default_state_dir", lambda: self.target):
+            instance = storage.Storage(self.root / "elsewhere")
+            self.assertEqual(self.root / "elsewhere", instance.state_dir)
+            self.assertFalse(getattr(instance, "migration", {"migrated": False})["migrated"])
+            self.assertTrue(self.legacy.is_dir())
 
 
-if __name__ == "__main__":
-    unittest.main()
+class UserAgentSettingsTests(unittest.TestCase):
+    def test_default_is_empty(self):
+        self.assertEqual("", storage.default_settings()["userAgent"])
+
+    def test_value_is_trimmed_and_whitespace_collapsed(self):
+        result = storage.validate_settings({"userAgent": "  MyBot/1.0 \n (test)  "})
+        self.assertEqual("MyBot/1.0 (test)", result["userAgent"])
+
+    def test_header_injection_is_flattened(self):
+        result = storage.validate_settings({"userAgent": "MyBot\r\nX-Evil: 1"})
+        self.assertNotIn("\n", result["userAgent"])
+        self.assertNotIn("\r", result["userAgent"])
+
+    def test_non_text_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "User-Agent"):
+            storage.validate_settings({"userAgent": 123})
+
+    def test_overlong_value_is_rejected(self):
+        from media_helper import net as user_agent
+        with self.assertRaisesRegex(ValueError, "User-Agent"):
+            storage.validate_settings({"userAgent": "A" * (user_agent.UA_MAX_LENGTH + 1)})
+
+    def test_flaresolverr_session_defaults_to_empty(self):
+        self.assertEqual("", storage.default_settings()["flaresolverrSession"])
+
+    def test_flaresolverr_session_is_whitespace_free(self):
+        result = storage.validate_settings({"flaresolverrSession": " my-session 2 "})
+        self.assertEqual("my-session2", result["flaresolverrSession"])
+
+    def test_flaresolverr_session_must_be_text(self):
+        with self.assertRaisesRegex(ValueError, "会话 ID"):
+            storage.validate_settings({"flaresolverrSession": 5})
+
+    def test_flaresolverr_session_length_is_limited(self):
+        from media_helper import net as flaresolverr_client
+        with self.assertRaisesRegex(ValueError, "会话 ID"):
+            storage.validate_settings({"flaresolverrSession": "a" * (flaresolverr_client.MAX_SESSION_LENGTH + 1)})
+
+    def test_flaresolverr_disables_custom_agent(self):
+        from media_helper import net as user_agent
+        self.assertEqual("", user_agent.ua_from_settings({"userAgent": "MyBot/1.0", "flaresolverrEnabled": True}))
+        self.assertEqual("MyBot/1.0", user_agent.ua_from_settings({"userAgent": "MyBot/1.0", "flaresolverrEnabled": False}))
+
+    def test_configure_publishes_and_clears_env(self):
+        from media_helper import net
+        keep = os.environ.get(net.UA_ENV)
+        try:
+            net.configure({"userAgent": "MyBot/1.0"})
+            self.assertEqual("MyBot/1.0", os.environ[net.UA_ENV])
+            self.assertEqual("MyBot/1.0", net.current_ua("default"))
+            net.configure({"userAgent": "MyBot/1.0", "flaresolverrEnabled": True})
+            self.assertNotIn(net.UA_ENV, os.environ)
+            self.assertEqual("default", net.current_ua("default"))
+        finally:
+            os.environ.pop(net.UA_ENV, None)
+            if keep is not None:
+                os.environ[net.UA_ENV] = keep
+
+
+class SaveRootDefaultsTests(unittest.TestCase):
+    """短剧默认保存路径应指向项目内 media/AI短剧，相对路径按项目根解析。"""
+
+    def test_default_points_at_ai_drama_directory(self):
+        settings = storage.default_settings()
+        self.assertEqual(Path(storage.PROJECT_ROOT) / "media" / "AI短剧", Path(settings["hgSaveRoot"]))
+
+    def test_relative_path_resolves_against_project_root(self):
+        self.assertEqual(Path(storage.PROJECT_ROOT) / "media" / "AI短剧",
+                         Path(storage.resolve_media_path("./media/AI短剧")))
+        self.assertEqual(Path(storage.PROJECT_ROOT) / "media" / "AI短剧",
+                         Path(storage.resolve_media_path("media/AI短剧")))
+        self.assertEqual("/abs/path/短剧", storage.resolve_media_path("/abs/path/短剧"))
+        self.assertEqual("", storage.resolve_media_path("   "))
+
+    def test_validate_settings_normalises_save_root(self):
+        result = storage.validate_settings({"hgSaveRoot": "./media/AI短剧"})
+        self.assertEqual(str(Path(storage.PROJECT_ROOT) / "media" / "AI短剧"), result["hgSaveRoot"])
+        self.assertTrue(Path(result["hgSaveRoot"]).is_absolute())

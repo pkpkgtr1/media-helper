@@ -11,8 +11,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import huangguo_client as hc
-import huangguo_manager as hm
+import media_helper.sources.huangguo as hc
+import media_helper.sources.manager as hm
 
 SUGGEST_HTML = """
 <section class="hg-search-suggest__section">
@@ -44,9 +44,20 @@ DETAIL_HTML = """
 <meta property="og:title" content="测试剧 - 黄果短剧">
 <meta property="og:description" content="剧情简介">
 <div class="hg-detail" data-src="https://pic.drleao.cn/poster.jpg?auth_key=2"></div>
-<span>全7集</span>
+<span>全 7 集</span>
 <a href="/video/123/ep-2/">2</a><a href="/video/123/ep-7/">7</a><a href="/video/123/ep-7/">7</a>
-<a class="hg-tag" href="/tag/a/">都市<span class="sr-only">x</span></a>
+<div class="hg-web-play__introcard">
+  <div class="hg-web-play__facts-foot">
+    <div class="hg-web-play__tags"><a class="hg-tag" href="/tag/a/">都市</a><a class="hg-tag" href="/tag/b/">甜宠</a></div>
+  </div>
+</div>
+<div class="hg-drama-card">
+  <a class="hg-drama-card__cover-link" href="/video/999/"><img data-src="https://pic.drleao.cn/other.jpg"></a>
+  <p class="hg-drama-card__desc">推荐位的其他剧</p>
+  <div class="hg-drama-card__tags"><a class="hg-tag" href="/tag/x/">男同<span class="sr-only">题材短剧 · 《推荐位》</span></a>
+    <a class="hg-tag" href="/tag/y/">后宫<span class="sr-only">题材短剧 · 《推荐位》</span></a>
+    <a class="hg-tag" href="/tag/z/">仙侠<span class="sr-only">题材短剧 · 《推荐位》</span></a></div>
+</div>
 """
 
 EPISODE_HTML = '''<source src="https://cdn.hzjvlo.cn/x.m3u8?auth_key=99&amp;v=3">'''
@@ -128,6 +139,13 @@ class StoreTests(unittest.TestCase):
             self.store.add(self.info, self.defaults)
         with self.assertRaises(ValueError):
             self.store.add({**self.info, "id": "9"}, self.defaults, saveRoot="   ")
+
+    def test_relative_save_root_resolves_against_project_root(self):
+        sub = self.store.add(self.info, {"hgSaveRoot": "./media/AI短剧"}, scope="new")
+        self.assertTrue(Path(sub["saveRoot"]).is_absolute())
+        self.assertEqual("AI短剧", Path(sub["saveRoot"]).name)
+        sub2 = self.store.add({**self.info, "id": "7"}, self.defaults, saveRoot="media/AI短剧")
+        self.assertTrue(Path(sub2["saveRoot"]).is_absolute())
 
     def test_scope_new_records_baseline(self):
         sub = self.store.add(self.info, self.defaults, scope="new")
@@ -322,8 +340,8 @@ class ThumbFrameTests(unittest.TestCase):
             return type("R", (), {"returncode": 0})()
 
         client = hc.Client()
-        with patch("huangguo_client.run_ffmpeg", fake_run), \
-             patch("huangguo_client._not_black", lambda path: path.read_bytes()[2:3] == b"1"):
+        with patch("media_helper.sources.huangguo.run_ffmpeg", fake_run), \
+             patch("media_helper.sources.huangguo._not_black", lambda path: path.read_bytes()[2:3] == b"1"):
             size = client.first_frame_thumb(video, out)
         used = [c[c.index("-vf") + 1] for c in calls]
         self.assertIn("eq(n\\,9)", used[0])
@@ -336,7 +354,7 @@ class ThumbFrameTests(unittest.TestCase):
             return type("R", (), {"returncode": 1})()
         video = Path(__file__).resolve().parent / "fixture.mp4"
         out = Path(__file__).resolve().parent / "thumb.jpg"
-        with patch("huangguo_client.run_ffmpeg", fail):
+        with patch("media_helper.sources.huangguo.run_ffmpeg", fail):
             with self.assertRaises(hc.HuangguoError):
                 hc.Client().first_frame_thumb(video, out)
         self.assertFalse(out.exists())
@@ -502,7 +520,7 @@ class DownloadProgressTests(unittest.TestCase):
                 return "https://cdn/x.m3u8"
             def episode_page_url(self, vid, ep):
                 return "https://huangguoai.com/video/11338/ep-2/"
-            def download_hls(self, m3u8, referer, out, proxy=None, workers=4, segment_limit=None, progress=None):
+            def download_hls(self, m3u8, referer, out, proxy=None, workers=4, segment_limit=None, progress=None, refresh=None):
                 season = out.parent
                 (season / (out.stem + ".nfo")).write_text("x", encoding="utf-8")
                 out.write_bytes(b"\xff" * 5000)
@@ -521,6 +539,48 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(task["indeterminate"], True)
         manager.close()
         temp.cleanup()
+
+
+class ClearTasksTests(unittest.TestCase):
+    """一键清空只清已结束的记录，进行中的任务必须留在列表里。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.manager = hm.HuangguoManager(lambda: {"hgSaveRoot": self.tmp.name}, root=self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _task(self, state, kind="download"):
+        with self.manager.lock:
+            self.manager.tasks.append(dict(id=state + kind, kind=kind, subscriptionId="s1",
+                                           subscriptionTitle="示例", state=state, progress=0,
+                                           error="", detail=None, message=""))
+            self.manager.revision += 1
+
+    def test_clear_keeps_running_tasks(self):
+        for state in ("completed", "failed", "cancelled", "waiting", "downloading", "checking"):
+            self._task(state)
+        before = self.manager.revision
+        result = self.manager.clear_tasks()
+        self.assertEqual(3, result["cleared"])
+        self.assertEqual(3, result["remaining"])
+        self.assertGreater(self.manager.revision, before)
+        states = {t["state"] for t in self.manager.snapshot_tasks()["tasks"]}
+        self.assertEqual({"waiting", "downloading", "checking"}, states)
+
+    def test_clear_on_empty_list_is_a_noop(self):
+        before = self.manager.revision
+        result = self.manager.clear_tasks()
+        self.assertEqual({"cleared": 0, "remaining": 0}, result)
+        self.assertEqual(before, self.manager.revision)
+        self.assertEqual([], self.manager.snapshot_tasks()["tasks"])
+
+    def test_clear_does_not_touch_download_records(self):
+        self.manager.records.mark("3467", 1, str(Path(self.tmp.name) / "a.mp4"), 10, source="yeguo")
+        self._task("completed")
+        self.manager.clear_tasks()
+        self.assertTrue(self.manager.records.snapshot())
 
 
 class DeleteFilesTests(unittest.TestCase):
@@ -610,6 +670,22 @@ class ClientParsingTests(unittest.TestCase):
         self.assertEqual(detail["title"], "测试剧")
         self.assertEqual(detail["total"], 7)
         self.assertEqual(detail["episodes"], list(range(1, 8)))  # 链接里只有 2 和 7
+
+    def test_detail_tags_ignore_recommendation_cards(self):
+        # 详情页里的猜你喜欢卡片各自带 hg-tag，不能混进本剧的标签。
+        detail = self.make().detail(123)
+        self.assertEqual(detail["tags"], ["都市", "甜宠"])
+
+    def test_detail_tags_fall_back_to_intro_card_without_tags_div(self):
+        html = ("<div class=\"hg-web-play__introcard\">"
+                "<a class=\"hg-tag\" href=\"/tag/m/\">悬疑</a>"
+                "</div><div class=\"hg-web-play__scorebox\"></div>")
+        client = FakeClient(pages={"/video/9/": FakeResponse(html)})
+        self.assertEqual(client.detail(9)["tags"], ["悬疑"])
+
+    def test_detail_without_intro_card_returns_no_tags(self):
+        client = FakeClient(pages={"/video/9/": FakeResponse("<h1>x</h1>")})
+        self.assertEqual(client.detail(9)["tags"], [])
 
     def test_episode_stream_unescapes_entities(self):
         stream = self.make().episode_stream(123, 2)
@@ -707,6 +783,210 @@ class TaskGuardTests(unittest.TestCase):
             two = self.manager.enqueue_check(self.sub["id"])
             self.assertIs(one["id"], two["id"])
             release.set()
+
+
+class SourceRegistryTests(unittest.TestCase):
+    """多源（黄果/野果）抽象：注册表、订阅唯一性、记录键、NFO 标记。"""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.manager = hm.HuangguoManager(lambda: {}, root=self.root)
+
+    def tearDown(self):
+        self.manager.close()
+        self.temp.cleanup()
+
+    def test_sources_registry(self):
+        self.assertEqual(hm.SOURCES["huangguo"], "黄果短剧")
+        self.assertEqual(hm.SOURCES["yeguo"], "野果短剧")
+        self.assertEqual(hm.source_label("yeguo"), "野果短剧")
+        self.assertEqual(hm.source_label(None), "黄果短剧")
+        self.assertEqual(hm.source_label("bogus"), "黄果短剧")
+
+    def test_make_client_picks_module(self):
+        self.assertIsInstance(hm.make_client("yeguo"), __import__("media_helper.sources.yeguo", fromlist=["Client"]).Client)
+        self.assertIsInstance(hm.make_client(None), hc.Client)
+
+    def test_same_video_id_on_two_sources_coexist(self):
+        base = {"id": "3992", "title": "同名剧", "url": "u", "cover": "", "description": "",
+                "tags": [], "premiered": "", "actors": "", "total": 1, "episodes": [1]}
+        one = self.manager.store.add({**base, "source": "huangguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+        two = self.manager.store.add({**base, "source": "yeguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+        self.assertNotEqual(one["id"], two["id"])
+        self.assertEqual(one["videoId"], two["videoId"])
+        with self.assertRaises(ValueError):
+            self.manager.store.add({**base, "source": "yeguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+
+    def test_default_source_is_huangguo(self):
+        info = {"id": "1", "title": "T", "url": "u", "cover": "", "description": "",
+                "tags": [], "premiered": "", "actors": "", "total": 1, "episodes": [1]}
+        sub = self.manager.store.add(info, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+        self.assertEqual(sub["source"], "huangguo")
+
+    def test_records_are_namespaced_per_source(self):
+        records = hm.DownloadRecord(self.root / "downloads.json")
+        (self.root / "a.mp4").write_bytes(b"a")
+        (self.root / "b.mp4").write_bytes(b"b")
+        records.mark("3992", 1, str(self.root / "a.mp4"), 10)
+        records.mark("3992", 1, str(self.root / "b.mp4"), 20, source="yeguo")
+        self.assertTrue(records.is_done("3992", 1))
+        self.assertTrue(records.is_done("3992", 1, "yeguo"))
+        self.assertFalse(records.is_done("3992", 2, "yeguo"))
+        self.assertEqual(records.key("3992", 1), "3992:1")
+        self.assertEqual(records.key("3992", 1, "yeguo"), "yeguo:3992:1")
+
+    def test_legacy_record_keys_still_match(self):
+        records = hm.DownloadRecord(self.root / "downloads.json")
+        legacy = self.root / "legacy.mp4"
+        legacy.write_bytes(b"x")
+        records.records["10883:3"] = {"path": str(legacy), "size": 1, "state": "done"}
+        self.assertTrue(records.is_done("10883", 3, "huangguo"))
+        self.assertFalse(records.is_done("10883", 3, "yeguo"))
+
+    def test_nfo_marks_source(self):
+        info = {"videoId": "7", "title": "剧", "url": "https://yeguodj.com/x",
+                "description": "d", "tags": [], "actors": "", "source": "yeguo"}
+        show = hm.tvshow_nfo(info)
+        self.assertIn("<studio>野果短剧</studio>", show)
+        self.assertIn('type="yeguo"', show)
+        self.assertIn('type="yeguo"', hm.episode_nfo(info, "第1集", 1, 1))
+        self.assertIn("黄果短剧", hm.tvshow_nfo({**info, "source": None}))
+
+    def test_missing_episodes_ignore_other_source(self):
+        info = {"id": "3992", "title": "T", "url": "u", "cover": "", "description": "",
+                "tags": [], "premiered": "", "actors": "", "total": 2, "episodes": [1, 2]}
+        sub = self.manager.store.add({**info, "source": "yeguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="all")
+        (self.root / "x.mp4").write_bytes(b"x")
+        (self.root / "y.mp4").write_bytes(b"y")
+        self.manager.records.mark("3992", 1, str(self.root / "x.mp4"), 1)
+        self.assertEqual(self.manager.missing_episodes(sub), [1, 2])
+        self.manager.records.mark("3992", 1, str(self.root / "y.mp4"), 1, source="yeguo")
+        self.assertEqual(self.manager.missing_episodes(sub), [2])
+
+    def test_task_carries_source(self):
+        info = {"id": "3992", "title": "T", "url": "u", "cover": "", "description": "",
+                "tags": [], "premiered": "", "actors": "", "total": 1, "episodes": [1]}
+        sub = self.manager.store.add({**info, "source": "yeguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+        task = self.manager._new_task("check", sub["id"])
+        self.assertEqual(task["source"], "yeguo")
+        self.assertEqual(task["sourceLabel"], "野果短剧")
+
+    def test_client_for_uses_source(self):
+        info = {"id": "3992", "title": "T", "url": "u", "cover": "", "description": "",
+                "tags": [], "premiered": "", "actors": "", "total": 1, "episodes": [1]}
+        sub = self.manager.store.add({**info, "source": "yeguo"}, {"hgSaveRoot": str(self.root / "m")}, scope="new")
+        client = self.manager._client_for(sub)
+        self.assertEqual(client.source_label, "野果短剧")
+
+
+class YeguoClientTests(unittest.TestCase):
+    """野果接口离线校验：AES 信封、解析、域名白名单、封面解密。"""
+
+    def setUp(self):
+        sys.path.insert(0, str(ROOT))
+        from media_helper.sources import yeguo as yeguo_client
+        self.yg = yeguo_client
+        self.client = yeguo_client.Client()
+
+    def _seal(self, payload):
+        import base64, json
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        plain = json.dumps({"data": payload}, ensure_ascii=False).encode()
+        pad = 16 - len(plain) % 16
+        plain += bytes([pad]) * pad
+        enc = Cipher(algorithms.AES(self.yg.API_KEY), modes.CBC(self.yg.API_IV)).encryptor()
+        return base64.b64encode(enc.update(plain) + enc.finalize()).decode()
+
+    def test_decrypt_roundtrip(self):
+        body = self._seal({"list": [{"video_id": 1}]})
+        import base64, json
+        plain = self.yg._aes_decrypt(base64.b64decode(body), self.yg.API_KEY, self.yg.API_IV)
+        self.assertEqual(json.loads(plain)["data"]["list"][0]["video_id"], 1)
+
+    def test_search_maps_fields(self):
+        fake = {"total": 1, "limit": 20, "list": [{
+            "id": 1, "video_id": 3992, "title": "庆余年", "cover": "https://pic.hdhwqx.cn/a.png",
+            "episodes": 6, "tags": ["古装"], "description": "简介", "play_count_text": "4.5W",
+        }]}
+        with patch.object(self.yg.Client, "_api", return_value=fake):
+            rows = self.client.search("庆余年")
+        self.assertEqual(rows[0]["id"], "3992")
+        self.assertEqual(rows[0]["source"], "yeguo")
+        self.assertEqual(rows[0]["sourceLabel"], "野果短剧")
+        self.assertEqual(rows[0]["episodeLabel"], "更新至6集")
+        self.assertEqual(rows[0]["score"], "4.5W")
+        self.assertTrue(rows[0]["url"].startswith("https://www.yeguodj.com/"))
+
+    def test_detail_maps_episodes(self):
+        fake = {"title": "庆余年", "episode_count": 2,
+                "episodes": [{"id": 11, "sort": 1}, {"id": 12, "sort": 2}],
+                "serialize_status_text": "已完结"}
+        with patch.object(self.yg.Client, "_api", return_value=fake):
+            info = self.client.detail("3992")
+        self.assertEqual(info["total"], 2)
+        self.assertEqual(info["episodes"], [1, 2])
+        self.assertEqual(info["episodeMap"], {1: 11, 2: 12})
+        self.assertEqual(info["status"], "已完结")
+
+    def test_episode_stream_uses_episode_id(self):
+        with patch.object(self.yg.Client, "_api", side_effect=[
+            {"episodes": [{"id": 11, "sort": 1}], "episode_count": 1},
+            {"video_url": "https://op.udhhzr.cn/a.m3u8?auth_key=1"},
+        ]):
+            url = self.client.episode_stream("3992", 1)
+        self.assertIn("udhhzr.cn", url)
+
+    def test_missing_episode_raises(self):
+        self.client._detail_cache["3992"] = (__import__("time").time(),
+                                             {"episodeMap": {1: 11}, "total": 1})
+        with self.assertRaises(self.yg.YeguoError):
+            self.client.episode_stream("3992", 9)
+
+    def test_host_allowlist(self):
+        self.client._check("https://www.yeguodj.com/api.php/x")
+        self.client._check("https://op.udhhzr.cn/a.m3u8", allow_cdn=True)
+        with self.assertRaises(self.yg.YeguoError):
+            self.client._check("https://evil.example.com/a")
+        with self.assertRaises(self.yg.YeguoError):
+            self.client._check("file:///etc/passwd")
+        with self.assertRaises(self.yg.YeguoError):
+            self.client._check("https://pic.hdhwqx.cn/a.png")  # 需 allow_cdn
+
+    def test_playlist_rejects_warning_page(self):
+        class Fake:
+            status_code = 200
+            content = b"<!DOCTYPE html><html>warning</html>"
+            def raise_for_status(self):
+                return None
+        with patch.object(self.yg.Client, "_cdn_fetch", return_value=Fake()), \
+             patch.object(self.yg.time, "sleep", lambda *_: None):
+            with self.assertRaises(self.yg.YeguoError):
+                self.client._playlist_text("https://op.udhhzr.cn/a.m3u8", "r")
+
+    def test_playlist_passes_through(self):
+        class Fake:
+            status_code = 200
+            content = b"#EXTM3U\n#EXTINF:5,\na.ts\n"
+            def raise_for_status(self):
+                return None
+        with patch.object(self.yg.Client, "_cdn_fetch", return_value=Fake()):
+            self.assertTrue(self.client._playlist_text("https://op.udhhzr.cn/a.m3u8", "r").startswith("#EXTM3U"))
+
+    def test_cover_decrypt(self):
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        png = b"\x89PNG\r\n\x1a\n" + b"0" * 8
+        enc = Cipher(algorithms.AES(self.yg.MEDIA_KEY), modes.CBC(self.yg.MEDIA_IV)).encryptor()
+        sealed = enc.update(png) + enc.finalize()
+
+        class Fake:
+            status_code = 200
+            content = sealed
+            def raise_for_status(self):
+                return None
+        with patch.object(self.yg.Client, "_cdn_fetch", return_value=Fake()):
+            data = self.client.fetch_image("https://pic.hdhwqx.cn/abc.png")
+        self.assertTrue(data.startswith(b"\x89PNG"))
 
 
 if __name__ == "__main__":

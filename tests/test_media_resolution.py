@@ -1,6 +1,6 @@
 import unittest
-from media_resolution import read_download_resolutions
-from media_resolution import download_resolutions, entry_resolution, resolution_from_url
+from media_helper.resolution import read_download_resolutions
+from media_helper.resolution import download_resolutions, entry_resolution, resolution_from_url
 
 
 class ResolutionTests(unittest.TestCase):

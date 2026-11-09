@@ -1,8 +1,0 @@
-requests>=2.31,<3
-beautifulsoup4>=4.12,<5
-lxml>=5,<7
-Pillow>=10,<13
-playwright>=1.55,<2
-selenium>=4,<5
-webdriver-manager>=4,<5
-cryptography>=42,<51

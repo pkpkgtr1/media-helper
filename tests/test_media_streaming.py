@@ -8,16 +8,20 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 from bs4 import BeautifulSoup
-from test_media_worker import legacy_functions
+try:  # discover 模式下 tests/ 直接在 sys.path 上
+    from test_media_worker import legacy_functions
+except ImportError:  # python -m unittest tests.test_xxx
+    from tests.test_media_worker import legacy_functions
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class NoBrowserTests(unittest.TestCase):
+    """hanime 抓取链路只用 requests，不再携带浏览器依赖。"""
+
     def test_hanime_path_never_imports_playwright(self):
-        for name in ("hanime_nfo_crawler.py", "media_resolution.py", "media_worker.py",
-                     "web_fetch.py", "flaresolverr_client.py"):
-            source = (ROOT / name).read_text(encoding="utf-8")
+        for name in ("crawler.py", "resolution.py", "worker.py", "net.py"):
+            source = (ROOT / "media_helper" / name).read_text(encoding="utf-8")
             self.assertNotIn("sync_playwright", source, name)
             self.assertNotIn("from playwright", source, name)
             self.assertNotIn("playwright.sync_api", source, name)
@@ -26,7 +30,7 @@ class NoBrowserTests(unittest.TestCase):
 
 class StreamingCrawlTests(unittest.TestCase):
     def test_first_record_and_images_exist_before_second_item_begins(self):
-        ns = legacy_functions("crawl_month", "ensure_dir", "_browser_timeout", "_proxy_url", "_proxy_kwargs", "safe_name", "clean_title_suffix")
+        ns = legacy_functions("crawl_month", "ensure_dir", "safe_name", "clean_title_suffix")
         listing = '<div class="home-rows-videos-wrapper">' + ''.join(
             f'<a href="/watch?v={i}"><div class="home-rows-videos-title">Study {i}</div><img src="https://fixture.invalid/{i}.jpg"></a>'
             for i in (1, 2)) + '</div>'
@@ -80,7 +84,7 @@ class StreamingCrawlTests(unittest.TestCase):
 
 class BlockedListingTests(unittest.TestCase):
     def test_challenge_page_reports_flaresolverr_hint(self):
-        ns = legacy_functions("crawl_month", "ensure_dir", "_browser_timeout", "_proxy_url", "_proxy_kwargs", "safe_name", "clean_title_suffix")
+        ns = legacy_functions("crawl_month", "ensure_dir", "safe_name", "clean_title_suffix")
         ns.update(_fetch_html=lambda *a, **kw: ("<html>Just a moment...</html>", 403),
                   _make_session=Mock(), BeautifulSoup=BeautifulSoup,
                   BASE_SEARCH="https://fixture.invalid/{year}/{month}", csv=csv, json=json,

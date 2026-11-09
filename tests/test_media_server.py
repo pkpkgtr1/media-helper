@@ -14,8 +14,8 @@ from http.server import ThreadingHTTPServer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from media_server import AccessPolicy, Application, TaskManager, handler_for, split_host, with_browser_hint
-from media_storage import Storage, atomic_write
+from media_helper.server import AccessPolicy, Application, TaskManager, handler_for, split_host
+from media_helper.config import Storage, atomic_write
 
 
 FAKE_WORKER = r'''
@@ -178,6 +178,34 @@ class TaskManagerTests(unittest.TestCase):
         self.assertEqual(states, dict(interrupted="cancelled", queued="cancelled", done="completed"))
         self.assertIsNone(self.manager.process)
 
+    def staging(self, month=3):
+        directory = self.root / "media" / f"2026-{month:02d}"
+        directory.mkdir(parents=True, exist_ok=True)
+        leftover = directory / ".media-download-fixture"
+        leftover.mkdir()
+        (leftover / "part.mp4").write_bytes(b"fixture part")
+        return directory, leftover
+
+    def test_task_start_removes_previous_leftover_staging(self):
+        directory, leftover = self.staging()
+        keep = directory / "River Study.nfo"
+        keep.write_bytes(b"fixture")
+        task_id, _ = self.enqueue()
+        self.assertEqual(self.terminal(task_id)["state"], "completed")
+        self.assertFalse(leftover.exists())
+        self.assertTrue(keep.exists())
+        logs = [line["msg"] for line in self.manager.snapshot()["logs"]]
+        self.assertTrue(any("临时文件" in message for message in logs))
+
+    def test_cancelled_task_leftover_staging_is_removed_after_monitor(self):
+        task_id, marker = self.enqueue("block")
+        self.wait_for(lambda: marker.with_suffix(".child").exists())
+        _, leftover = self.staging()
+        self.manager.action(dict(action="cancel", id=task_id))
+        self.wait_for(lambda: self.manager.process is None)
+        self.wait_for(lambda: not leftover.exists())
+        self.assertEqual(self.task(task_id)["state"], "cancelled")
+
 
 class HTTPBoundaryTests(unittest.TestCase):
     def setUp(self):
@@ -229,6 +257,40 @@ class HTTPBoundaryTests(unittest.TestCase):
                                          headers={"Content-Type": "application/json"})
                 self.assertEqual(status, 400)
         self.assertFalse((self.storage.state_dir / "settings.json").exists())
+
+    def test_saving_settings_publishes_custom_user_agent(self):
+        from media_helper import net as user_agent
+        keep = os.environ.get(user_agent.UA_ENV)
+        self.addCleanup(lambda: (os.environ.pop(user_agent.UA_ENV, None),
+                                 keep is not None and os.environ.__setitem__(user_agent.UA_ENV, keep)))
+        body = json.dumps({**self.storage.settings, "userAgent": "MyBot/1.0"})
+        status, result = self.request("POST", "/api/settings", body=body,
+                                      headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertEqual("MyBot/1.0", result["userAgent"])
+        self.assertEqual("MyBot/1.0", os.environ[user_agent.UA_ENV])
+        body = json.dumps({**self.storage.settings, "userAgent": "MyBot/1.0", "flaresolverrEnabled": True})
+        status, _ = self.request("POST", "/api/settings", body=body,
+                                 headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertNotIn(user_agent.UA_ENV, os.environ)
+
+    def test_saving_settings_publishes_flaresolverr_session(self):
+        import media_helper.net as fs
+        keep = os.environ.get(fs.ENV_SESSION)
+        self.addCleanup(lambda: (os.environ.pop(fs.ENV_SESSION, None),
+                                 keep is not None and os.environ.__setitem__(fs.ENV_SESSION, keep)))
+        base = {**self.storage.settings, "flaresolverrEnabled": True, "flaresolverrSession": " my-session "}
+        status, result = self.request("POST", "/api/settings", body=json.dumps(base),
+                                      headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertEqual("my-session", result["flaresolverrSession"])
+        self.assertEqual("my-session", fs.session_name())
+        status, _ = self.request("POST", "/api/settings",
+                                 body=json.dumps({**base, "flaresolverrEnabled": False}),
+                                 headers={"Content-Type": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertEqual("", fs.session_name())
 
     def test_state_get_does_not_write_files_or_change_tasks(self):
         before_tasks = self.app.tasks.snapshot()
@@ -402,20 +464,6 @@ class ProxyTestEndpointTests(unittest.TestCase):
         result = self.app.test_proxy({})
         self.assertFalse(result["ok"])
         self.assertIn("127.0.0.1:9", result["proxy"])
-
-
-class BrowserHintTests(unittest.TestCase):
-    def test_playwright_missing_message_gets_actionable_hint(self):
-        raw = ("BrowserType.launch: Executable doesn't exist at "
-               "/someone/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell")
-        hinted = with_browser_hint(raw)
-        self.assertTrue(hinted.startswith(raw))
-        self.assertIn("playwright install chromium", hinted)
-        self.assertIn("ms-playwright", hinted)
-
-    def test_other_errors_pass_through(self):
-        self.assertEqual(with_browser_hint("网络超时"), "网络超时")
-        self.assertEqual(with_browser_hint(""), "")
 
 
 if __name__ == "__main__":

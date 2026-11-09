@@ -1,0 +1,10 @@
+# 运行时依赖（Python 3.11+）
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+lxml>=5,<7
+Pillow>=10,<13
+# 黄果/野果接口的 AES 解密（封面与列表数据）必需，缺少时短剧功能不可用
+cryptography>=42,<51
+
+# 可选：离线日→中翻译（未安装则保留原文，不影响抓取）
+# argostranslate>=1.9,<2

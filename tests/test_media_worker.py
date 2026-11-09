@@ -10,24 +10,34 @@ from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import media_worker
+import media_helper.worker as media_worker
 
 
-def legacy_functions(*names, source_file="hanime_nfo_crawler.py"):
-    """Load pure function bodies without importing browser/translation modules."""
-    import os, re, time, unicodedata
+def legacy_functions(*names, source_file="media_helper/crawler.py"):
+    """Extract pure function bodies from the real module, keeping its globals.
+
+    Loading only the requested defs into a namespace seeded with the module's own
+    globals lets tests drive the production code path without importing heavy
+    optional dependencies at module scope.
+    """
+    import importlib, os, re, time, unicodedata
     from xml.sax.saxutils import escape
-    source = ast.parse((ROOT / source_file).read_text(encoding="utf-8-sig"))
-    nodes = [node for node in source.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    namespace = dict(os=os, re=re, time=time, tempfile=tempfile, unicodedata=unicodedata,
-                     __file__=str(ROOT / source_file),
-                     xml_escape=escape, Optional=__import__("typing").Optional, Dict=dict,
-                     urlparse=__import__("urllib.parse", fromlist=["urlparse"]).urlparse,
-                     unquote=__import__("urllib.parse", fromlist=["unquote"]).unquote,
-                     Tuple=__import__("typing").Tuple, requests=SimpleNamespace(Session=object),
-                     List=__import__("typing").List, Callable=__import__("typing").Callable,
-                     TAG_BLACKLIST_NORM=set(), TAG_BLACKLIST_NORM_LOWER=set(),
-                     TITLE_SUFFIX_PATTERN=re.compile(r"(?:\s*\[[^\]]+\]\s*)+$"))
+    path = ROOT / source_file
+    source = ast.parse(path.read_text(encoding="utf-8-sig"))
+    module = importlib.import_module(
+        ".".join(path.relative_to(ROOT).with_suffix("").parts)
+    )
+    nodes = [node for node in source.body
+             if isinstance(node, ast.FunctionDef) and node.name in names]
+    namespace = dict(module.__dict__)
+    namespace.update(
+        __file__=str(path), os=os, re=re, time=time, tempfile=tempfile, unicodedata=unicodedata,
+        xml_escape=escape, Optional=__import__("typing").Optional, Dict=dict,
+        urlparse=__import__("urllib.parse", fromlist=["urlparse"]).urlparse,
+        unquote=__import__("urllib.parse", fromlist=["unquote"]).unquote,
+        Tuple=__import__("typing").Tuple, List=__import__("typing").List,
+        Callable=__import__("typing").Callable,
+    )
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "legacy_test", "exec"), namespace)
     return namespace
 
@@ -228,7 +238,7 @@ class WorkerTests(unittest.TestCase):
         job_file = self.root / "job.json"
         job_file.write_text("{}", encoding="utf-8")
         script = """
-import media_worker, subprocess, sys
+import media_helper.worker as media_worker, subprocess, sys
 def fake(job, emit):
     print('python diagnostic')
     subprocess.run([sys.executable, '-c', "print('child diagnostic')"], check=True)
@@ -267,18 +277,8 @@ class LegacyWriteTests(unittest.TestCase):
             self.assertFalse(index.exists())
             self.assertFalse((month / "2026-03.csv").exists())
 
-    def test_external_download_failure_does_not_emit_saved_or_return_path(self):
-        ns = legacy_functions("download_html", "safe_filename_for_windows", source_file="download_move.py")
-        ns["_extract_urls_via_requests"] = lambda *args, **kwargs: (["Fixture"], ["https://fixture.invalid/1080p.mp4"])
-        ns["download_file"] = Mock(return_value=False)
-        events = []
-        with tempfile.TemporaryDirectory() as directory:
-            result = ns["download_html"]("1", "202603", lambda *args: events.append(args), out_dir=directory)
-        self.assertIsNone(result)
-        self.assertFalse(any(e[0] == 100 for e in events))
-
     def test_nfo_is_valid_xml_and_writes_same_selected_tags_and_genres(self):
-        import media_storage
+        import media_helper.config as media_storage
         catalog_patch = patch.object(media_storage, "official_categories", return_value=[dict(name="A & B", group="Fixture")])
         catalog_patch.start()
         self.addCleanup(catalog_patch.stop)
@@ -322,3 +322,24 @@ class LegacyWriteTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleIntegrityTests(unittest.TestCase):
+    """子进程按模块启动，模块级名字必须齐全（缺 import 只在真正跑任务时才炸）。"""
+
+    def test_crawler_module_exposes_xml_escape(self):
+        import media_helper.crawler as crawler
+        self.assertTrue(callable(crawler.xml_escape))
+        self.assertEqual("A &amp; B", crawler.xml_escape("A & B"))
+
+    def test_worker_runs_as_module(self):
+        result = subprocess.run([sys.executable, "-c",
+                                 "import media_helper.worker as w; print(w.__name__)"],
+                                cwd=ROOT, capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("media_helper.worker", result.stdout.strip())
+
+    def test_worker_entry_uses_module_flag_for_packaged_worker(self):
+        from media_helper.server import WORKER, worker_entry
+        self.assertEqual(["-m", "media_helper.worker"], worker_entry(WORKER))
+        self.assertEqual(["/tmp/custom_worker.py"], worker_entry(Path("/tmp/custom_worker.py")))
