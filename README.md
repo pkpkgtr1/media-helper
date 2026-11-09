@@ -260,10 +260,3 @@ cd web && pnpm typecheck && pnpm build
 - 可选 `ffmpeg` 与 `yt-dlp`，用于下载直链与 m3u8（放在项目 `bin/` 下也会被认）。
   「设置 → 维护 → 运行环境」会显示是否找到。
 - 可选 `argostranslate`，启用离线日中翻译；未安装时保留原文，不影响抓取。
-
-## 备注
-
-- 端口默认 8766，可与旧版的 8765 并存。
-- 短剧源走注册表（`SOURCES` / `make_client`），新增站点只需实现同名 Client 并登记。
-- 后端已去掉 Playwright 抓取路径，hanime 只走 requests + FlareSolverr，安装体积更小。
-- 前端用语义化颜色令牌做深浅主题；状态不只靠颜色区分，表格、抽屉、弹窗都支持键盘操作。
