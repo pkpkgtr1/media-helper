@@ -10,7 +10,9 @@ Tailwind v4，深浅两套主题，桌面与手机同一套布局。默认端口
 ## 快速开始
 
 ```bash
-cd /vol2/1000/app/media-helper
+cd media-helper/web
+pnpm build
+cd media-helper
 python3 start.py          # 首次运行会装依赖、构建界面，然后监听 0.0.0.0:8766
 bash 启动.sh              # 同上，额外先检查 pnpm 是否存在
 ```
