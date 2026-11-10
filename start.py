@@ -116,6 +116,11 @@ def already_running(argv):
     try:
         with urllib.request.urlopen(url + "/api/bootstrap", timeout=1) as response:
             data = json.load(response)
+    except urllib.error.HTTPError as exc:
+        # 设了登录密码时 /api/bootstrap 会返回 401；能应答就说明服务已经在跑。
+        if exc.code != 401:
+            return False
+        data = {"settings": {}}
     except (OSError, ValueError):
         return False
     if "settings" not in data:

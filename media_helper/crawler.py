@@ -17,6 +17,7 @@ import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Dict, List, Optional, Tuple
+from xml.sax.saxutils import escape as xml_escape
 
 import requests
 from bs4 import BeautifulSoup
@@ -24,7 +25,6 @@ from bs4 import BeautifulSoup
 from . import net
 from .config import PROJECT_ROOT, atomic_write, contained_file, filter_categories, publish_month_item
 from .resolution import read_download_resolutions
-from xml.sax.saxutils import escape as xml_escape
 
 # ---------------- 站点与选择器 ----------------
 BASE_SEARCH = ("https://hanime1.me/search?query=&type=&genre=%E8%A3%8F%E7%95%AA"
@@ -158,13 +158,33 @@ def _fetch_html(session, url, referer: Optional[str] = None, allow_flaresolverr:
 
 def safe_name(s): return re.sub(r'[\\/:*?"<>|\r\n]+', "_", (s or "")).strip()[:180]
 
+
+def clean_stream_url(url: str) -> str:
+    """把从 HTML 里抠出来的链接还原成可直接请求的形式。
+
+    页面里的直链常写成 `...?token=xxx&amp;expires=yyy`，签名参数被 HTML 转义。
+    原样拿去请求时服务端只看到 `token=xxx` 一个参数，签名对不上就回 403，
+    ffmpeg 报的 "Server returned 4XX Client Error" 就是这个原因。
+
+    只还原 `&` 相关的几个实体，不用 html.unescape：后者会把正常的查询参数
+    `&para=1` 变成 `¶=1`、`&notin=1` 变成 `¬in=1`，反而把链接改坏。
+    """
+    value = (url or "").strip()
+    for _ in range(2):  # 少数页面会转义两遍
+        cleaned = value.replace("&amp;", "&").replace("&#38;", "&").replace("&#x26;", "&")
+        if cleaned == value:
+            break
+        value = cleaned
+    return value
+
+
 def find_stream_url(html: str) -> str:
     m = re.search(r'https?://[^\s\'\"]+?\.m3u8[^\s\'\"]*', html)
-    if m: return m.group(0)
+    if m: return clean_stream_url(m.group(0))
     m2 = re.search(r'<source[^>]+src=["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', html, re.I)
-    if m2: return m2.group(1)
+    if m2: return clean_stream_url(m2.group(1))
     m3 = re.search(r'<video[^>]+src=["\']([^"\']+\.(?:mp4|m3u8)[^"\']*)["\']', html, re.I)
-    return m3.group(1) if m3 else ""
+    return clean_stream_url(m3.group(1)) if m3 else ""
 
 # ---------------- NFO 写入（按你的新要求） ----------------
 def write_movie_nfo(basepath: str, *,
@@ -679,16 +699,19 @@ def download_video_for_item(item: Dict, out_dir: str, logger=print, progress_cal
     def get_best_download_url_from_page(page_html: str) -> str:
         """
         从下载页 HTML 里抓出所有 mp4 链接，返回分辨率最高的那个。
+
+        抓到的链接要先做 HTML 实体反转义：页面里常见 `&amp;expires=`，
+        原样请求会让签名失效（403）。
         """
         urls = set()
 
         # 直接正则扫一遍 .mp4 链接
         for m in re.finditer(r'https?://[^\s"\']+?\.mp4[^\s"\']*', page_html):
-            urls.add(m.group(0))
+            urls.add(clean_stream_url(m.group(0)))
 
         # 再扫一遍 <a href="...mp4">
         for m in re.finditer(r'<a[^>]+href=["\']([^"\']+\.mp4[^"\']*)["\']', page_html, re.I):
-            urls.add(m.group(1))
+            urls.add(clean_stream_url(m.group(1)))
 
         best = ""
         best_q = 0
@@ -735,7 +758,8 @@ def download_video_for_item(item: Dict, out_dir: str, logger=print, progress_cal
         没有的话先尝试 requests 抓 watch 页；
         再不行就重新请求一次，被 403 / 防爬拦截时由 FlareSolverr 拿渲染后的页面。
         """
-        s = (item.get("stream_url") or "").strip()
+        # 索引里存的链接可能是旧版本写下的转义形态（&amp;），统一还原后再用。
+        s = clean_stream_url(item.get("stream_url") or "")
         if looks_like_direct(s):
             return s
 

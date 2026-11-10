@@ -185,6 +185,19 @@ export const Icon = {
       <path d="M11.6 8.4a3.4 3.4 0 0 0-4.8 0l-2 2a3.4 3.4 0 0 0 4.8 4.8l1-1" />
     </Svg>
   ),
+  lock: (p: IconProps) => (
+    <Svg {...p}>
+      <rect x="4" y="8.6" width="12" height="8" rx="1.8" />
+      <path d="M6.9 8.6V6.4a3.1 3.1 0 0 1 6.2 0v2.2" />
+      <path d="M10 11.8v1.6" />
+    </Svg>
+  ),
+  logout: (p: IconProps) => (
+    <Svg {...p}>
+      <path d="M8.2 3.6H5.2a1.6 1.6 0 0 0-1.6 1.6v9.6a1.6 1.6 0 0 0 1.6 1.6h3" />
+      <path d="M12.2 6.8 15.6 10l-3.4 3.2M15.6 10H8.4" />
+    </Svg>
+  ),
 }
 
 export type IconName = keyof typeof Icon

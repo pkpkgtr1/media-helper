@@ -10,10 +10,8 @@ Tailwind v4，深浅两套主题，桌面与手机同一套布局。默认端口
 ## 快速开始
 
 ```bash
-npm install -g pnpm
-cd media-helper/web
-pnpm build
-cd media-helper
+cd /vol2/1000/app/media-helper
+python3 start.py          # 首次运行会装依赖、构建界面，然后监听 0.0.0.0:8766
 bash 启动.sh              # 同上，额外先检查 pnpm 是否存在
 ```
 
@@ -57,6 +55,7 @@ bash 启动.sh              # 同上，额外先检查 pnpm 是否存在
 | `--state-dir` | 运行时数据目录，默认 `config/`；测试实例用它避开正式数据 |
 | `--output-root` | 覆盖 hanime 媒体库根目录 |
 | `--no-browser` | 启动后不自动打开浏览器 |
+| `--no-auth` | 跳过登录校验（密码保留），只给本机脚本调试用 |
 
 只监听回环时其他设备根本连不上，所以 `start.py` 在没给任何监听参数时会自动补上
 `--host 0.0.0.0 --lan`；来源仍受网段白名单约束。监听外部地址却不加 `--lan` 会被
@@ -85,6 +84,91 @@ python3 start.py --host 192.168.11.250 --lan  # 只绑某块网卡
 
 带点号的外部域名一律不认，哪怕它解析到内网 —— 这一条用来挡 DNS rebinding。局域网
 访问必须用 `http://192.168.x.x:8766` 这种 IP 直连，`Host` 对不上就是 403。
+
+## 登录
+
+设置过密码之后，**本机与局域网访问都要先过登录页**，没有例外。没设密码时保持原来的
+直接进入，界面会提示去设置（首次打开会直接弹出设置页，也可以选「稍后设置，先进入」）。
+
+- 密码只存本机 `config/auth.json`，PBKDF2-HMAC-SHA256（26 万次迭代 + 16 字节随机盐），
+  不写进 `settings.json`，所以导出设置、分享配置都不会带出密码。
+- 登录状态靠 `HttpOnly` 的 `mh_session` Cookie，令牌只放内存 —— 重启服务后需要重新
+  登录，30 天未使用自动失效，使用中自动续期。
+- 同一来源连续错 8 次锁 60 秒，锁定期内连正确密码也不放行。
+- 密码 6–128 位，不能有首尾空格。改密码需要先输当前密码，改完其他设备上的会话全部作废。
+- 忘记密码：停掉服务，删除 `config/auth.json`，重启后重新设置。文件里没有明文，
+  恢复只能走这一步。
+- `--no-auth` 只跳过校验、不动密码，适合本机脚本调试；对外开的实例别加这个参数。
+
+密码设置页在「设置 → 安全」，可以看登录状态、改密码、退出登录。接口是
+`/api/auth/status`、`/api/auth/setup`、`/api/auth/login`、`/api/auth/password`、
+`/api/auth/logout`。
+
+## Docker
+
+```bash
+docker compose up -d --build      # 首次构建大约 2–3 分钟
+docker compose logs -f            # 看启动日志
+```
+
+起来之后打开 `http://<宿主机IP>:8766`，第一次会要求设置访问密码。也可以不用 compose：
+
+```bash
+docker build -t media-helper .
+docker run -d --name media-helper -p 8766:8766 \
+  -v "$PWD/config:/app/config" -v "$PWD/media:/app/media" \
+  media-helper
+```
+
+镜像分两段构建：`node:22-alpine` 里 `pnpm build` 出 `web/dist`，再拷进
+`python:3.12-slim` 运行时，所以镜像里没有 Node 和 `node_modules`。运行时装了
+`ffmpeg` 与 `yt-dlp`，直链和 m3u8 都能直接下。
+
+| 挂载 / 变量 | 说明 |
+| --- | --- |
+| `/app/config` | 设置、任务、日志与登录密码，**必须持久化**，否则每次重建都要重设密码 |
+| `/app/media` | 默认输出目录，换成大容量盘即可 |
+| `MEDIA_PORT` | 容器内监听端口，默认 `8766`，改完记得同步 `ports` |
+| `MEDIA_ALLOW_LAN` | 默认 `1`；设成 `0` 就只绑回环，容器外访问不到 |
+| `MEDIA_STATE_DIR` / `MEDIA_OUTPUT_ROOT` | 想改上面两个路径时用，改了要同步改挂载点 |
+
+容器里以 uid 1000 的 `app` 用户运行。挂载宿主机目录时如果属主不同，入口脚本会直接
+报「目录不可写」并退出，改一下目录属主（`chown -R 1000:1000 config media`）即可。
+
+宿主机上 `config/` 与 `media/` 和本机直接运行是同一份，两种方式不要同时开 —— 端口
+会冲突，任务记录也可能互相覆盖。
+
+### 常见报错
+
+**`/bin/sh: 0: cannot open /usr/local/bin/entrypoint.sh: Permission denied`**
+
+镜像里的入口脚本没有可读权限。根因是源文件权限为 `600`（或在 Windows / 某些共享盘上
+丢失了可读位），而 Dockerfile 当时用的是 `chmod +x` —— `600` 补上 `x` 只得到 `711`
+（`rwx--x--x`）：属主可读写执行，**其他人只能执行、不能读**。容器以 `app`（uid 1000）
+启动 `/bin/sh 脚本`，读文件这一步就失败了，于是报这个错（和
+`/bin/sh /etc/shadow` 的报错一模一样）。
+
+现在 Dockerfile 已改成 `chmod 755` + `chmod -R a+rX /app`，并且
+`ENTRYPOINT ["/bin/sh", "..."]`，只要求可读，不再依赖可执行位。重建即可：
+
+```bash
+docker compose build --no-cache && docker compose up -d
+```
+
+手上只有旧镜像、想立刻验证别的东西时，可以暂时用 root 启动（属主位可读），
+但以 root 跑会在 `/app/config` 里留下 root 属主的文件，验证完记得改回来：
+
+```bash
+docker run --rm -it --user root -p 8766:8766 \
+  -v "$PWD/config:/app/config" -v "$PWD/media:/app/media" media-helper:latest
+```
+
+**`目录不可写：/app/config`**
+
+挂载目录属主不是 uid 1000。宿主机上执行 `chown -R 1000:1000 config media`，或在
+compose 里加 `user: "$(id -u):$(id -g)"` 用当前用户跑。
+
+
 
 ## 功能
 
@@ -140,7 +224,7 @@ NFO 里写入哪些分类与标签由「设置 → 分类与标签」决定，�
 
 ## 设置
 
-设置存在 `config/settings.json`，界面「设置」里分五组：
+设置存在 `config/settings.json`，界面「设置」里分六组：
 
 - **常规**：默认输出目录、海报模式（网页截图已下线，封面与背景图统一从站点下载）、
   封面来源（DMM / ani-map / 自动选择）、已有图片处理（跳过 / 重新下载）。
@@ -149,6 +233,7 @@ NFO 里写入哪些分类与标签由「设置 → 分类与标签」决定，�
 - **网络**：代理开关与地址（`http` / `socks5`，支持 `http://用户:密码@主机:端口`）、
   User-Agent、FlareSolverr 开关 / 地址 / 会话 ID。
 - **分类与标签**：NFO 保留的分类与标签、更新已有 NFO。
+- **安全**：登录状态、修改 / 设置访问密码、退出登录。
 - **维护**：运行环境检测（Python、FFmpeg、yt-dlp、依赖、FlareSolverr 状态，只报告
   不安装）、导出日志、导入 / 导出设置。
 
@@ -190,17 +275,20 @@ media_helper/
   worker.py         子进程任务，JSONL 事件流回传进度
   resolution.py     m3u8 分辨率探测
   translator.py     离线日中翻译（可选依赖，缺失时原样返回）
-  server.py         HTTP 服务、访问控制、任务调度、接口路由
+  auth.py           登录密码、会话令牌、失败冷却
+  server.py         HTTP 服务、访问控制、登录拦截、任务调度、接口路由
   sources/          短剧源：huangguo、yeguo 与统一订阅管理器
 web/                前端源码，构建产物 dist/ 由后端托管
+docker/             容器入口脚本
+Dockerfile / docker-compose.yml  容器构建与编排
 design-system/      设计令牌与页面规范
 tests/              单元测试
 config/             运行时数据（已 gitignore）
 media/              默认输出目录（已 gitignore）
 ```
 
-`config/` 里放着 `settings.json`、`tasks.json`、`operations.log`、`jobs/`（每个任务的
-输出与 stderr）和 `huangguo/`（`subscriptions.json`、`downloads.json`）。旧版本的
+`config/` 里放着 `settings.json`、`tasks.json`、`operations.log`、`auth.json`（登录密码）、
+`jobs/`（每个任务的输出与 stderr）和 `huangguo/`（`subscriptions.json`、`downloads.json`）。旧版本的
 `.media-helper/` 目录首次启动会自动改名迁移，目标已有 `settings.json` 时不覆盖。
 
 ## 接口
@@ -218,6 +306,9 @@ media/              默认输出目录（已 gitignore）
 | `/api/task-action` | `cancel` / `retry` / `clear-completed` / `retry-failed` |
 | `/api/nfo/preview`、`/api/nfo/apply` | NFO 分类预览与写入 |
 | `/api/logs/clear`、`/api/proxy/test` | 清空日志、测试代理连通性 |
+| `/api/auth/status` | 是否设置密码、当前请求是否已登录 |
+| `/api/auth/setup`、`/api/auth/password` | 首次设置密码、修改密码 |
+| `/api/auth/login`、`/api/auth/logout` | 登录（下发 Cookie）、退出 |
 | `/api/choose-directory`、`/api/open-path` | 选目录、在文件管理器中打开 |
 | `/api/hg/search`、`/api/hg/detail` | 短剧搜索（`source` 可为 `all`）与详情 |
 | `/api/hg/subscriptions`、`/api/hg/tasks`、`/api/hg/records` | 订阅、任务、下载记录 |
@@ -245,18 +336,16 @@ pnpm build        # 类型检查 + 构建到 web/dist
 ## 测试
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -q      # 216 个用例
+.venv/bin/python -m unittest discover -s tests -q      # 248 个用例
 cd web && pnpm typecheck && pnpm build
 ```
 
 涉及文件读写的用例都在 `tempfile.TemporaryDirectory` 里跑，不会动 `config/` 与
 `media/`；整套约 10 秒。
 
-## 依赖
+## ⚠️ 免责声明
 
-- Python 3.11+，必需包见 `requirements.txt`：`requests`、`beautifulsoup4`、`lxml`、
-  `Pillow`；短剧接口的 AES 解密需要 `cryptography`，缺了短剧功能不可用。
-- Node.js + pnpm：只在构建界面时需要。
-- 可选 `ffmpeg` 与 `yt-dlp`，用于下载直链与 m3u8（放在项目 `bin/` 下也会被认）。
-  「设置 → 维护 → 运行环境」会显示是否找到。
-- 可选 `argostranslate`，启用离线日中翻译；未安装时保留原文，不影响抓取。
+- 本项目仅用于**个人学习与技术研究**，不提供任何资源内容，也不存储任何受版权保护的文件。
+- 所有数据均来自公开网络，由使用者自行配置的账号与网络环境获取，**使用者需自行承担合规责任**。
+- 请勿用于商业用途、二次分发或任何违反当地法律法规的场景。
+- 因使用本工具导致的账号封禁、数据丢失等后果，由使用者自行承担。

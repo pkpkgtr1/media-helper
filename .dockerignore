@@ -1,0 +1,18 @@
+# 构建上下文只需要源码与依赖清单；状态、媒体与本地环境一律不带进镜像。
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+.DS_Store
+
+config/
+media/
+*.log
+
+web/node_modules/
+web/dist/
+web/.vite/
+
+docker-compose.yml

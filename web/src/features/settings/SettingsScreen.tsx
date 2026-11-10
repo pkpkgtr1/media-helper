@@ -9,15 +9,17 @@ import { DownloadPanel } from "./DownloadPanel"
 import { NetworkPanel } from "./NetworkPanel"
 import { TagsPanel } from "./TagsPanel"
 import { MaintenancePanel } from "./MaintenancePanel"
+import { SecurityPanel } from "./SecurityPanel"
 import { errorText } from "../../lib/format"
 
-type Group = "常规" | "下载" | "网络" | "分类与标签" | "维护"
+type Group = "常规" | "下载" | "网络" | "分类与标签" | "安全" | "维护"
 
 const GROUPS: { key: Group; icon: (p: { size?: number }) => React.ReactNode }[] = [
   { key: "常规", icon: Icon.settings },
   { key: "下载", icon: Icon.download },
   { key: "网络", icon: Icon.link },
   { key: "分类与标签", icon: Icon.database },
+  { key: "安全", icon: Icon.lock },
   { key: "维护", icon: Icon.warn },
 ]
 
@@ -94,6 +96,7 @@ export function SettingsScreen() {
             {group === "下载" ? <DownloadPanel draft={draft} patch={patch} /> : null}
             {group === "网络" ? <NetworkPanel draft={draft} patch={patch} /> : null}
             {group === "分类与标签" ? <TagsPanel draft={draft} patch={patch} /> : null}
+            {group === "安全" ? <SecurityPanel /> : null}
             {group === "维护" ? <MaintenancePanel draft={draft} patch={patch} /> : null}
           </div>
         </div>

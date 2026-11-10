@@ -1,0 +1,31 @@
+# docker compose up -d --build
+# 首次启动后打开 http://<宿主机IP>:8766 ，按提示设置访问密码。
+services:
+  media-helper:
+    build: .
+    image: media-helper:latest
+    container_name: media-helper
+    restart: unless-stopped
+    ports:
+      - "8766:8766"
+    environment:
+      # 监听与放行交给入口脚本，这里只需要给出对外端口。
+      MEDIA_PORT: "8766"
+      MEDIA_ALLOW_LAN: "1"
+      # 需要走代理抓取时改成 http://用户:密码@主机:端口
+      # MEDIA_PROXY: ""
+    volumes:
+      # config 存设置、任务、日志与登录密码，必须持久化。
+      - ./config:/app/config
+      # media 是默认输出目录，空间大的盘直接挂过来。
+      - ./media:/app/media
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8766/api/auth/status', timeout=4).status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

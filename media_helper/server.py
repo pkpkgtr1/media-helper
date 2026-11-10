@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import net
+from .auth import COOKIE_NAME, SESSION_TTL, AuthError, AuthStore
 from .config import (PROJECT_ROOT, PACKAGE_ROOT, Storage, atomic_write, cleanup_staging_dirs,
                      default_settings, exists, library_entries, mask_proxy, month_directory,
                      proxy_from_settings, read_month, safe_base)
@@ -491,11 +492,13 @@ def task_view(task):
 
 
 class Application:
-    def __init__(self, storage, dist=None, worker_path=None, dev_origins=()):
+    def __init__(self, storage, dist=None, worker_path=None, dev_origins=(), auth=None):
         self.storage = storage
         # 短剧客户端在本进程内直接发请求：启动与保存设置时都要发布 UA/代理/会话。
         net.configure(storage.settings)
         self.tasks = TaskManager(storage, worker_path)
+        # 登录：密码存于 config/auth.json，与会话令牌一起决定请求是否放行。
+        self.auth = auth if auth is not None else AuthStore(storage.state_dir)
         self.dist = Path(dist or DIST).resolve()
         self.dev_origins = {str(value).rstrip("/") for value in dev_origins if str(value).strip()}
         self.allowed_roots = {Path(storage.settings["outputRoot"]).resolve()}
@@ -544,6 +547,47 @@ class Application:
         if not any(path.is_relative_to(root) for root in self.allowed_roots):
             raise ValueError("路径不在已选择的媒体目录中")
         return path
+
+    # ------------------------------------------------------------ 登录相关
+
+    def auth_status(self):
+        """登录页与启动流程都靠它判断：要不要设密码、要不要先登录。"""
+        return dict(hasPassword=self.auth.has_password, updatedAt=self.auth.updated_at)
+
+    def setup_password(self, body):
+        """首次设置密码；已有密码时必须先通过验证才能改。"""
+        password = body.get("password")
+        if self.auth.has_password:
+            if not self.auth.verify(body.get("current")):
+                raise ValueError("当前密码不正确")
+        try:
+            self.auth.set_password(password)
+        except AuthError as exc:
+            raise ValueError(str(exc)) from exc
+        # 改完密码直接登录，省得再输一次。
+        return dict(token=self.auth.issue())
+
+    def login(self, body, key=""):
+        wait = self.auth.blocked_for(key)
+        if wait:
+            raise ValueError(f"密码错误次数过多，请 {wait} 秒后再试")
+        if not self.auth.has_password:
+            raise ValueError("尚未设置密码")
+        if not self.auth.verify(body.get("password")):
+            self.auth.note_failure(key)
+            raise ValueError("密码不正确")
+        self.auth.reset_failures(key)
+        return dict(token=self.auth.issue())
+
+    def change_password(self, body):
+        if not self.auth.verify(body.get("current")):
+            raise ValueError("当前密码不正确")
+        try:
+            self.auth.set_password(body.get("password"))
+        except AuthError as exc:
+            raise ValueError(str(exc)) from exc
+        return dict(token=self.auth.issue())
+
 
     def get(self, route, query):
         if route == "/api/bootstrap":
@@ -733,7 +777,7 @@ class Application:
         raise FileNotFoundError("接口不存在")
 
 
-def handler_for(app, policy=None):
+def handler_for(app, policy=None, no_auth=False):
     policy = policy or AccessPolicy()
     # 本机 Vite 开发服务器的 Origin 默认放行，可用 MEDIA_DEV_ORIGINS 追加。
     dev_origins = {str(value).strip().rstrip("/") for value in
@@ -761,7 +805,7 @@ def handler_for(app, policy=None):
             request_host, request_port = split_host(host)
             return origin_host == request_host and (not origin_port or not request_port or origin_port == request_port)
 
-        def _send(self, status, data, content_type="application/json; charset=utf-8", cache=None):
+        def _send(self, status, data, content_type="application/json; charset=utf-8", cache=None, headers=None):
             content = data if isinstance(data, bytes) else json.dumps(data, ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -770,6 +814,8 @@ def handler_for(app, policy=None):
             # 允许浏览器缓存才能做到详情封面直接命中、不再回源。
             self.send_header("Cache-Control", cache or "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             try: self.wfile.write(content)
             except (BrokenPipeError, ConnectionResetError): pass
@@ -777,11 +823,50 @@ def handler_for(app, policy=None):
         def _error(self, exc):
             self._send(404 if isinstance(exc, FileNotFoundError) else 400, {"error": str(exc)})
 
+        def _client_key(self):
+            return str(self.client_address[0] if self.client_address else "")
+
+        def _token(self):
+            for part in (self.headers.get("Cookie") or "").split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == COOKIE_NAME:
+                    return value.strip()
+            return ""
+
+        def _logged_in(self):
+            return app.auth.check(self._token())
+
+        def _cookie_headers(self, token):
+            # 本地 HTTP 部署用不上 Secure；SameSite=Strict 挡住跨站带 Cookie。
+            value = f"{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}"
+            return {"Set-Cookie": value}
+
+        def _clear_cookie(self):
+            return {"Set-Cookie": f"{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"}
+
+        def _blocked(self, path):
+            """未登录时要拦下的请求返回 True；静态资源与登录接口始终放行。
+
+            只有设置过密码之后才启用，首次运行先让用户进界面设置密码。
+            """
+            if not app.auth.has_password or no_auth:
+                return False
+            if path.startswith("/api/auth/"):
+                return False
+            # 静态资源必须放行，否则登录页自己都加载不出来。
+            if not path.startswith("/api/"):
+                return False
+            return not self._logged_in()
+
         def do_GET(self):
             if not self._trusted():
                 return self._send(403, {"error": "仅允许从本机应用访问"})
             url = urlparse(self.path)
             query = parse_qs(url.query)
+            if self._blocked(url.path):
+                return self._send(401, {"error": "请先登录"})
+            if url.path == "/api/auth/status":
+                return self._send(200, {**app.auth_status(), "authenticated": self._logged_in()})
             try:
                 if url.path == "/api/asset":
                     path = app.path(query["path"][0])
@@ -825,7 +910,22 @@ def handler_for(app, policy=None):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError("请求必须是对象")
-                self._send(200, app.post(urlparse(self.path).path, body))
+                route = urlparse(self.path).path
+                if self._blocked(route):
+                    return self._send(401, {"error": "请先登录"})
+                if route == "/api/auth/login":
+                    result = app.login(body, key=self._client_key())
+                    return self._send(200, {"ok": True}, headers=self._cookie_headers(result["token"]))
+                if route == "/api/auth/setup":
+                    result = app.setup_password(body)
+                    return self._send(200, {"ok": True}, headers=self._cookie_headers(result["token"]))
+                if route == "/api/auth/password":
+                    result = app.change_password(body)
+                    return self._send(200, {"ok": True}, headers=self._cookie_headers(result["token"]))
+                if route == "/api/auth/logout":
+                    app.auth.revoke(self._token())
+                    return self._send(200, {"ok": True}, headers=self._clear_cookie())
+                self._send(200, app.post(route, body))
             except Exception as exc:
                 self._error(exc)
     return Handler
@@ -843,6 +943,8 @@ def main():
     parser.add_argument("--state-dir")
     parser.add_argument("--output-root")
     parser.add_argument("--no-browser", action="store_true")
+    parser.add_argument("--no-auth", dest="no_auth", action="store_true",
+                        help="跳过登录校验（密码仍保留，便于本机脚本调试）")
     args = parser.parse_args()
 
     bind_host = args.host or os.environ.get("MEDIA_HOST") or "127.0.0.1"
@@ -868,7 +970,7 @@ def main():
     if app.huangguo:
         app.huangguo.start()
     try:
-        server = ThreadingHTTPServer((bind_host, args.port), handler_for(app, policy))
+        server = ThreadingHTTPServer((bind_host, args.port), handler_for(app, policy, no_auth=args.no_auth))
     except OSError:
         app.tasks.close()
         raise
@@ -895,6 +997,12 @@ def main():
             else:
                 print(f"警告：监听地址 {bind_host} 不在放行网段 {limits} 内，其他设备会被拒绝；"
                       "请调整 --lan-cidr 或改用 --host 0.0.0.0", flush=True)
+    if args.no_auth:
+        print("登录校验已关闭（--no-auth），任何能访问该地址的设备都可直接操作", flush=True)
+    elif app.auth.has_password:
+        print("登录已启用：浏览器首次访问需要输入密码", flush=True)
+    else:
+        print("尚未设置登录密码：首次打开界面时会要求设置", flush=True)
     if not args.no_browser:
         import webbrowser
         webbrowser.open(f"http://{machine_host}:{port}")
