@@ -48,6 +48,9 @@ export const EMPTY_SETTINGS: AppSettings = {
   hgConcurrent: 4,
   hgRetries: 2,
   hgRetryInterval: 30,
+  ltxSyncEnabled: true,
+  ltxIntervalValue: 6,
+  ltxIntervalUnit: "hour",
   categories: [],
 }
 

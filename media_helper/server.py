@@ -29,6 +29,7 @@ from .auth import COOKIE_NAME, SESSION_TTL, AuthError, AuthStore
 from .config import (PROJECT_ROOT, PACKAGE_ROOT, Storage, atomic_write, cleanup_staging_dirs,
                      default_settings, exists, library_entries, mask_proxy, month_directory,
                      proxy_from_settings, read_month, safe_base)
+from . import ltx
 from .sources import SOURCES, HuangguoManager, source_label
 
 DIST = PROJECT_ROOT / "web" / "dist"
@@ -512,6 +513,11 @@ class Application:
             for sub_item in self.huangguo.store.snapshot():
                 if sub_item.get("saveRoot"):
                     self.allow(sub_item["saveRoot"])
+        # Jasna 资源库：数据落在 config/ltxdb/，与根目录的 ltxdb.py 共用同一份库。
+        self.ltx_data_dir = self.storage.state_dir / "ltxdb"
+        self.ltx = ltx.Scheduler(lambda: self.storage.settings,
+                                 log=lambda msg, level="info": self.tasks.log(f"资源库：{msg}", level),
+                                 data_dir=self.ltx_data_dir)
 
     def allow(self, root):
         self.allowed_roots.add(Path(root).expanduser().resolve())
@@ -604,6 +610,37 @@ class Application:
             return library_entries(root, year, month, self.storage.settings, self.tasks.snapshot()["tasks"])
         if route.startswith("/api/hg/"):
             return self.huangguo_get(route, query)
+        if route.startswith("/api/ltx/"):
+            return self.ltx_get(route, query)
+        raise FileNotFoundError("接口不存在")
+
+    def ltx_get(self, route, query):
+        if route == "/api/ltx/status":
+            data = ltx.status(self.ltx_data_dir)
+            data["nextSync"] = self.ltx.next_run() or data.get("nextSync")
+            data["enabled"] = bool(self.storage.settings.get("ltxSyncEnabled"))
+            data["intervalSeconds"] = ltx.interval_seconds(self.storage.settings)
+            return data
+        if route == "/api/ltx/items":
+            def first(key, default=""):
+                return (query.get(key) or [default])[0]
+
+            def number(key, default):
+                try:
+                    return int(first(key, str(default)))
+                except ValueError:
+                    return default
+
+            return ltx.search(keyword=first("keyword"), maker=first("maker"), genre=first("genre"),
+                              sort=first("sort", "date"), page=number("page", 1),
+                              limit=number("limit", 48), data_dir=self.ltx_data_dir)
+        if route == "/api/ltx/detail":
+            code = (query.get("code") or [""])[0].strip()
+            if not code:
+                raise ValueError("请提供番号")
+            return ltx.detail(code, self.ltx_data_dir)
+        if route == "/api/ltx/filters":
+            return {"makers": ltx.makers(self.ltx_data_dir), "genres": ltx.genres(self.ltx_data_dir)}
         raise FileNotFoundError("接口不存在")
 
     def hg(self):
@@ -680,6 +717,7 @@ class Application:
             result = self.storage.save_settings(body)
             net.configure(result)
             self.allow(result["outputRoot"])
+            self.ltx.reschedule()  # 周期改了要立刻生效，不能等下一轮循环
             self.tasks.log("设置已保存，后续任务使用新设置")
             return result
         if route == "/api/choose-directory":
@@ -694,6 +732,9 @@ class Application:
             path = self.path(body["path"])
             open_local(path)
             return {"ok": True}
+        if route == "/api/ltx/sync":
+            # 手动同步在请求线程里跑完再返回，界面无需轮询；单次约 10–30 秒。
+            return self.ltx.run_once(reason="手动")
         if route == "/api/tasks":
             self.allow(body["outputRoot"])
             return self.tasks.enqueue(body)
@@ -884,6 +925,13 @@ def handler_for(app, policy=None, no_auth=False):
                     data = app.hg().cover_image((query.get("subscriptionId") or [""])[0])
                     kind = "image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
                     return self._send(200, data, kind, cache="private, max-age=86400")
+                if url.path == "/api/ltx/cover":
+                    # 只允许站点 CDN；取不到就回 404，让界面走占位图。
+                    data = ltx.fetch_cover((query.get("url") or [""])[0])
+                    if not data:
+                        raise FileNotFoundError("封面获取失败")
+                    kind = "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+                    return self._send(200, data, kind, cache="private, max-age=86400")
                 if url.path.startswith("/api/"):
                     return self._send(200, app.get(url.path, query))
                 path = (app.dist / url.path.lstrip("/")).resolve()
@@ -969,6 +1017,7 @@ def main():
     app = Application(storage, dev_origins=dev_origins or DEFAULT_DEV_ORIGINS)
     if app.huangguo:
         app.huangguo.start()
+    app.ltx.start()
     try:
         server = ThreadingHTTPServer((bind_host, args.port), handler_for(app, policy, no_auth=args.no_auth))
     except OSError:
@@ -1013,6 +1062,7 @@ def main():
     finally:
         if app.huangguo:
             app.huangguo.close()
+        app.ltx.close()
         app.tasks.close()
         server.server_close()
 

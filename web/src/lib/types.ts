@@ -51,6 +51,10 @@ export interface AppSettings {
   hgConcurrent: number
   hgRetries: number
   hgRetryInterval: number
+  /** Jasna 资源库是否按周期自动同步。 */
+  ltxSyncEnabled: boolean
+  ltxIntervalValue: number
+  ltxIntervalUnit: "minute" | "hour" | "day"
   categories: Category[]
 }
 
@@ -212,4 +216,66 @@ export interface NfoPreview {
   unrecoverable: number
   preview: { id: string; title: string; before: string; after: string }[]
   token: string
+}
+
+export interface LtxItem {
+  code: string
+  title: string
+  titleZh: string
+  actors: string[]
+  date: string
+  maker: string
+  cover: string
+  url: string
+  score: number
+  votes: number
+  linkCount: number
+  pending: boolean
+  missing: boolean
+  waiting: boolean
+  shot: string
+  director: string
+  genres: string[]
+  subtitle: boolean
+  addedAt: number | null
+}
+
+export interface LtxLink {
+  kind: string
+  name: string
+  size: number
+  sizeText: string
+  url: string
+}
+
+export interface LtxDetail extends LtxItem {
+  links: LtxLink[]
+  subtitleUrl: string
+  titleRaw: string
+}
+
+export interface LtxPage {
+  items: LtxItem[]
+  total: number
+  page: number
+  pages: number
+  limit: number
+}
+
+export interface LtxStatus {
+  total: number
+  withLinks: number
+  pending: number
+  makers: number
+  genres: number
+  syncedAt: number | null
+  nextSync: number | null
+  updatedAt: number | null
+  dateFrom: string
+  dateTo: string
+  lastError: string
+  ready: boolean
+  enabled: boolean
+  intervalSeconds: number
+  nyaa: { checked_at?: number; added?: number; ok?: boolean } | null
 }

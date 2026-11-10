@@ -1,4 +1,4 @@
-export type Screen = "library" | "drama" | "settings"
+export type Screen = "library" | "drama" | "jasna" | "settings"
 export type Theme = "light" | "dark"
 
 const SCREEN_KEY = "media-helper.screen"
@@ -8,7 +8,9 @@ export function initialScreen(): Screen {
   // 刷新后停留在原分类；非法或缺失值回落到 hanime 媒体库
   try {
     const saved = window.localStorage.getItem(SCREEN_KEY)
-    return saved === "library" || saved === "drama" || saved === "settings" ? saved : "library"
+    return saved === "library" || saved === "drama" || saved === "jasna" || saved === "settings"
+      ? saved
+      : "library"
   } catch {
     return "library"
   }

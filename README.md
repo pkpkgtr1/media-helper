@@ -222,12 +222,46 @@ NFO 里写入哪些分类与标签由「设置 → 分类与标签」决定，�
 短剧默认保存在 `media/AI短剧`。保存路径支持相对路径（如 `./media/AI短剧`），一律按
 项目根目录解析，不受启动时工作目录影响。
 
+### Jasna 资源库
+
+第三个分类，读的是 `config/ltxdb/ltx.db`（SQLite），与根目录的 `ltxdb.py` 命令行
+脚本共用同一份数据，任一边同步另一边立刻可见。
+
+数据来自 `https://ltx.libray.workers.dev/api/items`，该站点只有一个公开接口，一次
+返回全量（约 2800 条）。同步 = 拉一次 → 写 `items.json` 原始快照（原子替换）→
+upsert 进库；单次约 4–6 秒。
+
+- **搜索**：关键词同时匹配番号、标题、中文标题、演员、厂商与导演；番号大小写与
+  连字符不敏感（`ssis834`、`SSIS-834` 都能命中）。
+- **筛选**：按厂商、分类、排序（发行日期 / 评分 / 热度 / 收录时间）过滤，分页显示，
+  每页 48 条。
+- **详情**：点卡片打开，显示演员、导演、分类、评分与全部 ed2k / 磁力链接（含文件名
+  与体积），可一键复制链接或字幕地址。
+- **同步**：页面顶部「立即同步」手动拉一次；也可以按「设置 → 常规 → Jasna 资源库」
+  里设定的周期自动同步（默认每 6 小时，服务启动时若从没同步过会立刻补一次）。
+
+封面经 `/api/ltx/cover` 代理，只放行 `jdbstatic.com` 与 `javdb.com` 两个域名，结果
+按 URL 缓存 12 小时，避免这个接口被当成任意 URL 代理。
+
+命令行仍可直接用：
+
+```bash
+python3 ltxdb.py sync                 # 拉全量
+python3 ltxdb.py stats                # 库统计
+python3 ltxdb.py lookup SSIS-834      # 按番号查
+python3 ltxdb.py search 三上 --limit 10
+```
+
+`LTXDB_HOME` 可覆盖库位置，默认 `config/ltxdb`。
+
 ## 设置
 
 设置存在 `config/settings.json`，界面「设置」里分六组：
 
-- **常规**：默认输出目录、海报模式（网页截图已下线，封面与背景图统一从站点下载）、
-  封面来源（DMM / ani-map / 自动选择）、已有图片处理（跳过 / 重新下载）。
+- **常规**：默认输出目录、启动月份、完成后打开输出目录、Jasna 资源库自动同步开关与
+  同步周期（1–9999 分钟 / 小时 / 天，默认 6 小时）、海报模式（网页截图已下线，封面与
+  背景图统一从站点下载）、封面来源（DMM / ani-map / 自动选择）、已有图片处理
+  （跳过 / 重新下载）。
 - **下载**：已有视频处理（跳过 / 重新下载）、失败重试次数（0–20，0 表示不重试）、
   下载间隔、请求超时。
 - **网络**：代理开关与地址（`http` / `socks5`，支持 `http://用户:密码@主机:端口`）、
@@ -267,6 +301,7 @@ NFO 里写入哪些分类与标签由「设置 → 分类与标签」决定，�
 
 ```
 start.py            一键启动：准备依赖、构建前端、补监听参数、起服务
+ltxdb.py            Jasna 资源库命令行（sync / stats / lookup / search / export）
 启动.sh / 启动.bat   启动包装脚本（Linux / Windows）
 media_helper/
   config.py         设置读写、月份索引、NFO 生成与预览
@@ -277,18 +312,20 @@ media_helper/
   translator.py     离线日中翻译（可选依赖，缺失时原样返回）
   auth.py           登录密码、会话令牌、失败冷却
   server.py         HTTP 服务、访问控制、登录拦截、任务调度、接口路由
+  ltx.py            Jasna 资源库：抓取、SQLite 入库、检索与定时同步
   sources/          短剧源：huangguo、yeguo 与统一订阅管理器
 web/                前端源码，构建产物 dist/ 由后端托管
 docker/             容器入口脚本
 Dockerfile / docker-compose.yml  容器构建与编排
 design-system/      设计令牌与页面规范
 tests/              单元测试
-config/             运行时数据（已 gitignore）
+config/             运行时数据（已 gitignore），含 ltxdb/ltx.db
 media/              默认输出目录（已 gitignore）
 ```
 
 `config/` 里放着 `settings.json`、`tasks.json`、`operations.log`、`auth.json`（登录密码）、
-`jobs/`（每个任务的输出与 stderr）和 `huangguo/`（`subscriptions.json`、`downloads.json`）。旧版本的
+`jobs/`（每个任务的输出与 stderr）、`huangguo/`（`subscriptions.json`、`downloads.json`）
+和 `ltxdb/`（`ltx.db` 与接口原始快照 `items.json`）。旧版本的
 `.media-helper/` 目录首次启动会自动改名迁移，目标已有 `settings.json` 时不覆盖。
 
 ## 接口
@@ -316,6 +353,12 @@ media/              默认输出目录（已 gitignore）
 | `/api/hg/subscription/update`、`/api/hg/subscription/remove`、`/api/hg/subscription/repair` | 修改、删除订阅，修复封面 |
 | `/api/hg/check`、`/api/hg/download`、`/api/hg/thumb` | 检查更新、下载指定集、补截图 |
 | `/api/hg/task/cancel`、`/api/hg/task/retry`、`/api/hg/task/clear` | 短剧任务控制 |
+| `/api/ltx/status` | Jasna 资源库状态：条数、上次 / 下次同步、周期、失败原因 |
+| `/api/ltx/items?keyword=&maker=&genre=&sort=&page=&limit=` | 检索资源库（关键词、厂商、分类、排序、分页） |
+| `/api/ltx/detail?code=` | 单条详情，含链接文件名与体积 |
+| `/api/ltx/filters` | 可选厂商与分类列表 |
+| `/api/ltx/sync` | 立即同步（POST，同步完成才返回） |
+| `/api/ltx/cover?url=` | 封面代理，仅放行站点 CDN |
 
 图片走 `<img>` 标签，所以单列几个二进制接口：`/api/asset?path=`（本地封面，限已选
 目录）、`/api/hg/image?url=`（站点图片，SSRF 防护后代理解密）、
@@ -336,7 +379,7 @@ pnpm build        # 类型检查 + 构建到 web/dist
 ## 测试
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -q      # 248 个用例
+.venv/bin/python -m unittest discover -s tests -q      # 286 个用例
 cd web && pnpm typecheck && pnpm build
 ```
 

@@ -314,6 +314,7 @@ class HuangguoManager:
         self.revision = 0
         self.stop = threading.Event()
         self._threads = {}
+        self._scheduler = None
 
     def delete_downloaded(self, sub):
         """Remove only the show directory, and only inside its own saveRoot."""
@@ -519,6 +520,23 @@ class HuangguoManager:
 
     def close(self):
         self.stop.set()
+        # 等后台线程退出再返回：调度线程每 2 秒醒来一次，检查线程会写订阅
+        # nextCheck/任务记录，不 join 就会和调用方的目录清理竞态
+        # （tempfile 报「Directory not empty」）。给的是总预算而不是每个线程
+        # 各等一次，否则线程多时关闭会被拖成十几秒。下载线程可能正在传大文件，
+        # 只在其已经空闲时才等待，避免关闭被长时间阻塞。
+        deadline = time.time() + 1.2
+        current = threading.current_thread()
+        thread = self._scheduler
+        if thread and thread.is_alive() and thread is not current:
+            thread.join(timeout=max(0.0, deadline - time.time()))
+        with self.lock:
+            pending = [t for t in self._threads.values() if t.is_alive() and t is not current]
+        for worker in pending:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            worker.join(timeout=remaining)
 
     def _scheduler_loop(self):
         while not self.stop.wait(2):

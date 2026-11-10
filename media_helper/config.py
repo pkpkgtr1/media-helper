@@ -172,6 +172,7 @@ def default_settings():
                 flaresolverrSession="", userAgent="",
                 hgSaveRoot=str(PROJECT_ROOT / "media" / "AI短剧"), hgIntervalValue=6, hgIntervalUnit="hour",
                 hgConcurrent=4, hgRetries=2, hgRetryInterval=30,
+                ltxSyncEnabled=True, ltxIntervalValue=6, ltxIntervalUnit="hour",
                 categories=categories)
 
 
@@ -236,9 +237,14 @@ def validate_settings(value):
     result["hgSaveRoot"] = resolve_media_path(result["hgSaveRoot"])
     for key, lo, hi in (("retries", 0, 20), ("downloadInterval", 0, 600000), ("requestTimeout", 1, 3600),
                         ("hgIntervalValue", 1, 9999), ("hgConcurrent", 1, 8),
-                        ("hgRetries", 0, 5), ("hgRetryInterval", 0, 3600)):
+                        ("hgRetries", 0, 5), ("hgRetryInterval", 0, 3600),
+                        ("ltxIntervalValue", 1, 9999)):
         if type(result[key]) is not int or not lo <= result[key] <= hi:
             raise ValueError(f"{key} 必须是 {lo}–{hi} 之间的整数")
+    if not isinstance(result["ltxSyncEnabled"], bool):
+        raise ValueError("无效开关：ltxSyncEnabled")
+    if result["ltxIntervalUnit"] not in ("minute", "hour", "day"):
+        raise ValueError("无效设置：ltxIntervalUnit")
     if not isinstance(result["categories"], list):
         raise ValueError("分类规则必须是列表")
     categories, seen = [], set()

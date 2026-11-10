@@ -99,6 +99,9 @@ export function validateSettings(value: unknown): AppSettings {
     hgConcurrent: clampInt(data.hgConcurrent, 1, 8, 4),
     hgRetries: clampInt(data.hgRetries, 0, 5, 2),
     hgRetryInterval: clampInt(data.hgRetryInterval, 0, 3600, 30),
+    ltxSyncEnabled: data.ltxSyncEnabled !== false,
+    ltxIntervalValue: clampInt(data.ltxIntervalValue, 1, 9999, 6),
+    ltxIntervalUnit: data.ltxIntervalUnit === "minute" || data.ltxIntervalUnit === "day" ? data.ltxIntervalUnit : "hour",
     categories,
   }
 }

@@ -1,6 +1,7 @@
 import { useApp } from "../../state"
 import { Button, Card, Segmented, Select, SettingRow, TextInput } from "../../components/ui/primitives"
 import { Icon } from "../../components/ui/icons"
+import { unitLabel } from "../../lib/format"
 import type { AppSettings } from "../../lib/types"
 
 type Patch = (value: Partial<AppSettings>) => void
@@ -54,6 +55,54 @@ export function GeneralPanel({ draft, patch }: { draft: AppSettings; patch: Patc
             ]}
             onChange={(v) => patch({ openAfter: v === "on" })}
           />
+        </SettingRow>
+      </Card>
+
+      <Card title="Jasna 资源库">
+        <SettingRow
+          title="自动同步"
+          hint="开启后按下面设定的周期从 ltx.libray.workers.dev 拉取全量数据；关闭后只能在资源库页面手动同步。"
+        >
+          <Segmented
+            label="Jasna 资源库自动同步"
+            value={draft.ltxSyncEnabled ? "on" : "off"}
+            options={[
+              { value: "on", label: "开启" },
+              { value: "off", label: "关闭" },
+            ]}
+            onChange={(v) => patch({ ltxSyncEnabled: v === "on" })}
+          />
+        </SettingRow>
+        <SettingRow
+          title="同步周期"
+          hint={
+            draft.ltxSyncEnabled
+              ? `每 ${draft.ltxIntervalValue} ${unitLabel(draft.ltxIntervalUnit)}自动同步一次，数据用于 Jasna 资源库分类的展示与搜索。`
+              : "自动同步已关闭，此处的周期暂不生效。"
+          }
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <TextInput
+              value={Number.isNaN(draft.ltxIntervalValue) ? "" : String(draft.ltxIntervalValue)}
+              onChange={(value) =>
+                patch({ ltxIntervalValue: value.trim() ? Number(value) : Number.NaN })
+              }
+              mono
+              ariaLabel="Jasna 同步周期数值"
+              className="w-[80px]"
+            />
+            <Select
+              value={draft.ltxIntervalUnit}
+              options={[
+                { value: "minute", label: "分钟" },
+                { value: "hour", label: "小时" },
+                { value: "day", label: "天" },
+              ]}
+              ariaLabel="Jasna 同步周期单位"
+              onChange={(value) => patch({ ltxIntervalUnit: value as AppSettings["ltxIntervalUnit"] })}
+              className="w-[100px]"
+            />
+          </div>
         </SettingRow>
       </Card>
 

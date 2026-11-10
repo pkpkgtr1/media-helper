@@ -8,6 +8,7 @@ import { cx } from "./ui/primitives"
 const NAV: { key: Screen; label: string; hint: string; icon: (p: { size?: number }) => ReactNode }[] = [
   { key: "library", label: "媒体库", hint: "hanime 月度批量抓取", icon: Icon.library },
   { key: "drama", label: "AI短剧", hint: "搜索 · 订阅 · 自动下载", icon: Icon.drama },
+  { key: "jasna", label: "Jasna 资源库", hint: "番号检索 · 链接直取", icon: Icon.database },
   { key: "settings", label: "设置", hint: "下载、网络与标签", icon: Icon.settings },
 ]
 
@@ -36,7 +37,9 @@ export function Shell({
       ? `${year} 年 ${String(month).padStart(2, "0")} 月 · 共 ${entries.length} 个条目`
       : screen === "drama"
         ? "搜索 · 订阅 · 定时检查 · Emby 目录下载"
-        : "更改在保存后生效"
+        : screen === "jasna"
+          ? "本地资源库 · 关键词检索 · ed2k 链接"
+          : "更改在保存后生效"
 
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg">

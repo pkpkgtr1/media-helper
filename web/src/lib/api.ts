@@ -3,7 +3,7 @@ import type { AppSettings, LibraryResponse, Snapshot } from "./types"
 export const DEFAULT_FLARESOLVERR_URL = "http://192.168.11.253:8191/v1"
 
 export const APP_NAME = "媒体下载助手"
-export const APP_VERSION = "V2.2"
+export const APP_VERSION = "V2.3"
 
 /** 未登录时后端返回 401；前端据此切到登录页，而不是弹一堆报错。 */
 export class UnauthorizedError extends Error {
@@ -37,6 +37,17 @@ export async function api<T = unknown>(path: string, body?: unknown): Promise<T>
   if (!response.ok) throw new Error(value?.error || `请求失败（${response.status}）`)
   if (value === null) throw new Error("本地服务响应异常，请通过启动脚本打开程序")
   return value as T
+}
+
+/** 带查询参数的 GET：`api()` 只接路径，这里把参数拼成 query string。 */
+export function apiGet<T = unknown>(path: string, params?: Record<string, string | number>): Promise<T> {
+  const query = new URLSearchParams()
+  for (const [key, value] of Object.entries(params ?? {})) {
+    const text = String(value ?? "").trim()
+    if (text) query.set(key, text)
+  }
+  const suffix = query.toString()
+  return api<T>(suffix ? `${path}?${suffix}` : path)
 }
 
 export type { LibraryResponse, Snapshot }

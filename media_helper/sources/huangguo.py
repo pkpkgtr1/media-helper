@@ -285,17 +285,81 @@ class Client:
         return f"{BASE}/video/{int(video_id)}/ep-{int(ep)}/" \
             if int(ep) > 1 else f"{BASE}/video/{int(video_id)}/"
 
-    # ---------------- video ----------------
+    def _cdn_auth(self, page_text):
+        """Playing URL needs the CDN auth header advertised by the page.
+
+        The detail/episode page embeds `#videoInitialData` with the CDN gate
+        (authKey/authValue). Missing it is fine for plain GETs but the playback
+        endpoint 403s for some episodes, so read it defensively.
+        """
+        match = re.search(r'<script[^>]*id="videoInitialData"[^>]*>(.*?)</script>', page_text, re.S)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(1))
+        except (ValueError, TypeError):
+            return {}
+        key = str(data.get("cdnAuthKey") or "").strip()
+        value = str(data.get("cdnAuthValue") or "").strip()
+        return {key: value} if key and value else {}
+
+    def _post(self, url, headers, body="{}"):
+        """POST helper (playback API); isolated so tests can stub it out."""
+        return self.session.post(url, headers=headers, data=body, timeout=self.timeout)
+
+    def _playback_stream(self, video_id, ep, page_url):
+        """Resolve via POST /api/videos/{id}/episodes/{ep}/playback.
+
+        站点 2026-11 改版后的唯一取址方式：返回的 data.streams.main 才是带签名
+        的 m3u8。旧 GET /api/videos/{id}/play 现在对所有集都回空 video_url，
+        这正是「第N集未找到播放地址」的直接原因。空 body 是必需的：带
+        {"ep":N} 反而会被判「播放参数无效」。
+        """
+        api_url = f"{BASE}/api/videos/{video_id}/episodes/{ep}/playback"
+        headers = {"Referer": page_url, "Content-Type": "application/json",
+                   "X-Requested-With": "XMLHttpRequest"}
+        try:
+            page = self._get(page_url, referer=page_url)
+            headers.update(self._cdn_auth(page.text))
+        except HuangguoError:
+            pass  # 取不到附属页也不该阻断取链，跳过鉴权头直接试
+        try:
+            response = self._post(api_url, headers)
+        except (requests.ConnectionError, requests.Timeout) as exc:
+            raise HuangguoError(f"访问失败：{exc}")
+        if response.status_code != 200:
+            raise HuangguoError(f"HTTP {response.status_code}：{api_url}")
+        try:
+            payload = response.json()
+        except ValueError:
+            raise HuangguoError("播放地址接口返回非 JSON")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise HuangguoError(str(payload.get("msg") or "播放地址接口未返回数据"))
+        streams = data.get("streams") or {}
+        for name in ("main", "hevc", "preview"):
+            play = htmllib.unescape(str(streams.get(name) or ""))
+            if ".m3u8" in play:
+                return play
+        return ""
+
     def episode_stream(self, video_id, ep, title=""):
         """Resolve the m3u8 for one episode. Call right before downloading.
 
-        站点改版后分集页 <source> 不再带 src（播放器 JS 动态取址），
-        改为优先请求 JSON 端点 /api/videos/{id}/play?ep=N；
-        端点异常时退回解析页面 HTML（兼容旧结构或站点再次调整）。
+        取址顺序（新→旧，兼容站点多次改版）：
+          1. POST /api/videos/{id}/episodes/{ep}/playback 的 data.streams.main（2026-11 起）
+          2. GET  /api/videos/{id}/play?ep=N 的 data.video_url（旧版接口，现多为空串）
+          3. 分集页 HTML 里的 <source src="...m3u8">（更旧的结构）
         """
         video_id = int(video_id)
         ep = int(ep)
         page_url = self.episode_page_url(video_id, ep)
+        try:
+            play = self._playback_stream(video_id, ep, page_url)
+            if play:
+                return play
+        except HuangguoError:
+            pass
         api_url = f"{BASE}/api/videos/{video_id}/play?ep={ep}&r={int(time.time())}"
         try:
             data = self._get(api_url, referer=page_url).json().get("data") or {}

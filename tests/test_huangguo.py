@@ -66,8 +66,15 @@ PROTOCOL_JS = '''window.CryptoImageProtocol = Object.freeze({"decryptEnabled": t
 
 
 class FakeResponse:
-    def __init__(self, text="", content=b"", status_code=200):
+    def __init__(self, text="", content=b"", status_code=200, payload=None):
         self.text, self.content, self.status_code = text, content or text.encode(), status_code
+        self._payload = payload
+
+    def json(self):
+        if self._payload is not None:
+            return self._payload
+        import json as _json
+        return _json.loads(self.text)
 
 
 class FakeClient(hc.Client):
@@ -78,6 +85,9 @@ class FakeClient(hc.Client):
         self.pages = pages or {}
         self.requested = []
 
+    posts = None
+    post_headers = None
+
     def _get(self, url, referer=None, retries=3, wait=2.0, allow_cdn=False):
         self.requested.append(url)
         hc._safe(url, allow_cdn=allow_cdn)
@@ -85,6 +95,16 @@ class FakeClient(hc.Client):
             if needle in url:
                 return payload
         raise hc.HuangguoError(f"no fixture for {url}")
+
+    def _post(self, url, headers, body="{}"):
+        """Serve canned playback JSON; recording headers lets tests assert auth."""
+        self.requested.append(("POST", url))
+        self.post_headers = dict(headers)
+        hc._safe(url)
+        for needle, payload in (self.posts or {}).items():
+            if needle in url:
+                return payload
+        raise hc.HuangguoError(f"no post fixture for {url}")
 
 
 class NamingTests(unittest.TestCase):
@@ -686,6 +706,57 @@ class ClientParsingTests(unittest.TestCase):
     def test_detail_without_intro_card_returns_no_tags(self):
         client = FakeClient(pages={"/video/9/": FakeResponse("<h1>x</h1>")})
         self.assertEqual(client.detail(9)["tags"], [])
+
+    def test_episode_stream_prefers_playback_endpoint(self):
+        """站点 2026-11 改版：地址只在 POST .../episodes/N/playback 里。"""
+        client = FakeClient(pages={"/video/123/ep-2": FakeResponse(EPISODE_HTML)})
+        client.posts = {"/episodes/2/playback": FakeResponse(payload={"data": {
+            "streams": {"main": "https://cdn.hzjvlo.cn/new.m3u8?auth_key=7&amp;v=9", "hevc": ""}}})}
+        stream = client.episode_stream(123, 2)
+        self.assertIn("new.m3u8", stream)
+        self.assertIn("auth_key=7&v=9", stream)  # 实体已反转义
+        self.assertIn(("POST", hc.BASE + "/api/videos/123/episodes/2/playback"), client.requested)
+
+    def test_episode_stream_falls_back_when_playback_empty(self):
+        """playback 返回空 streams 时仍要走旧接口/页面，不能直接失败。"""
+        client = FakeClient(pages={"/video/123/ep-2": FakeResponse(EPISODE_HTML)})
+        client.posts = {"/episodes/2/playback": FakeResponse(payload={"data": {"streams": {"main": ""}}})}
+        self.assertTrue(client.episode_stream(123, 2).endswith("&v=3"))
+
+    def test_episode_stream_falls_back_when_playback_errors(self):
+        client = FakeClient(pages={"/video/123/ep-2": FakeResponse(EPISODE_HTML)})
+        client.posts = {"/episodes/2/playback": FakeResponse(payload={"data": [], "msg": "播放参数无效"})}
+        self.assertTrue(client.episode_stream(123, 2).endswith("&v=3"))
+
+    def test_playback_sends_cdn_auth_from_initial_data(self):
+        """页内 videoInitialData 的 cdnAuthKey/Value 必须带进播放请求头。"""
+        page = ('<script id="videoInitialData" type="application/json">'
+                '{"cdnAuthKey":"x-cdn-auth","cdnAuthValue":"abc123"}</script>')
+        client = FakeClient(pages={"/video/123/ep-2": FakeResponse(page)})
+        client.posts = {"/episodes/2/playback": FakeResponse(payload={"data": {
+            "streams": {"main": "https://cdn.hzjvlo.cn/a.m3u8"}}})}
+        client.episode_stream(123, 2)
+        self.assertEqual(client.post_headers.get("x-cdn-auth"), "abc123")
+        self.assertIn("/video/123/ep-2/", client.post_headers.get("Referer", ""))
+
+    def test_playback_posts_empty_body(self):
+        """带 {"ep":N} 会被站点判「播放参数无效」，必须是空 JSON 对象。"""
+        captured = {}
+
+        class Recorder(FakeClient):
+            def _post(self, url, headers, body="{}"):
+                captured["body"] = body
+                return FakeResponse(payload={"data": {"streams": {"main": "https://cdn.hzjvlo.cn/a.m3u8"}}})
+
+        Recorder(pages={"/video/123/ep-2": FakeResponse(EPISODE_HTML)}).episode_stream(123, 2)
+        self.assertEqual(captured["body"], "{}")
+
+    def test_missing_episode_still_raises_when_all_paths_empty(self):
+        client = FakeClient(pages={"/video/123/ep-9": FakeResponse("<html></html>")})
+        client.posts = {"/episodes/9/playback": FakeResponse(payload={"data": {"streams": {}}})}
+        with self.assertRaises(hc.HuangguoError) as ctx:
+            client.episode_stream(123, 9)
+        self.assertIn("未找到播放地址", str(ctx.exception))
 
     def test_episode_stream_unescapes_entities(self):
         stream = self.make().episode_stream(123, 2)
